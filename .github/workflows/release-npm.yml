@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 1.2.3 or 1.2.3-beta.0; a leading v is stripped)."
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -69,6 +74,26 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
       - run: pnpm install
+      - name: Resolve release version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          version="${version#v}" # strip an optional leading v
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid version '$version' (expected semver like 1.2.3)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Stamp the version across all three packages BEFORE napi prepublish, which
+      # propagates it to the platform packages + optionalDependencies. pnpm then
+      # rewrites jest/vitest's `workspace:*` transform dep to this exact version.
+      - name: Set package versions
+        run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -78,19 +103,28 @@ jobs:
       - name: Create platform npm dirs / update optionalDependencies
         working-directory: crates/ng-transform-napi
         run: pnpm exec napi prepublish -t npm --skip-gh-release
-      # Platform binary packages (@oxc-angular-testing/binding-*) + main package.
-      - name: Publish binding platform packages
-        working-directory: crates/ng-transform-napi
+      # Publish binding platform packages, then the main package (which
+      # optionalDepends on them), then jest/vitest (which depend on transform).
+      # Idempotent: a package is skipped only when this exact version already
+      # exists on npm (so a re-run after a partial failure completes the rest);
+      # any other publish error fails the job.
+      - name: Publish to npm
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          for dir in npm/*/; do
-            pnpm publish "$dir" --access public --provenance --no-git-checks || true
+          set -euo pipefail
+          publish() {
+            local dir="$1" name
+            name="$(node -p "require('./${dir}/package.json').name")"
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "::notice::${name}@${VERSION} already published — skipping"
+            else
+              pnpm publish "$dir" --access public --provenance --no-git-checks
+            fi
+          }
+          for dir in crates/ng-transform-napi/npm/*/; do
+            publish "${dir%/}"
           done
-      - name: Publish @oxc-angular-testing/transform
-        working-directory: crates/ng-transform-napi
-        run: pnpm publish --access public --provenance --no-git-checks
-      - name: Publish @oxc-angular-testing/jest
-        working-directory: packages/jest
-        run: pnpm publish --access public --provenance --no-git-checks
-      - name: Publish @oxc-angular-testing/vitest
-        working-directory: packages/vitest
-        run: pnpm publish --access public --provenance --no-git-checks
+          publish crates/ng-transform-napi
+          publish packages/jest
+          publish packages/vitest
