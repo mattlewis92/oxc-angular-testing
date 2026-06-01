@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/ng-transform", "crates/ng-transform-napi"]
+# The vendored coverage crate builds only as a [patch.crates-io] target, never
+# as a workspace member. See vendor/VENDORED.md.
+exclude = ["vendor/oxc-coverage-instrument"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+license = "MIT"
+repository = "https://github.com/mattlewis/oxc-angular-testing"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# All oxc crates pinned to 0.126 to match the vendored coverage crate. Cargo's
+# single lockfile unifies every oxc_* crate (ours + the vendored one's) to the
+# same resolved 0.126.x, which is what keeps the arena AST types compatible so
+# the Angular transforms and the coverage visitor can share one AST.
+oxc_allocator = "0.126"
+oxc_ast = "0.126"
+oxc_ast_visit = "0.126"
+oxc_codegen = "0.126"
+oxc_parser = "0.126"
+oxc_semantic = "0.126"
+oxc_span = "0.126"
+oxc_syntax = "0.126"
+oxc_transformer = "0.126"
+oxc_traverse = "0.126"
+oxc_coverage_instrument = "0.7.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[patch.crates-io]
+oxc_coverage_instrument = { path = "vendor/oxc-coverage-instrument" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
