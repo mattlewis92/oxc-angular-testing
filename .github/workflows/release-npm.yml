@@ -59,12 +59,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish to npm (OIDC)
+    name: Publish to npm
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # required for npm trusted publishing (OIDC)
+      id-token: write # npm provenance + trusted publishing (OIDC)
+    env:
+      # Token auth for the FIRST release, before trusted publishing is configured
+      # on npmjs.com (which needs the packages to exist). Set the `NPM_TOKEN` repo
+      # secret to a granular automation token; once trusted publishing is set up,
+      # delete the secret and the publish authenticates via OIDC with no token.
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
@@ -103,6 +109,12 @@ jobs:
       - name: Create platform npm dirs / update optionalDependencies
         working-directory: crates/ng-transform-napi
         run: pnpm exec napi prepublish -t npm --skip-gh-release
+      # Token auth for the bootstrap release; skipped (→ OIDC) when the secret is
+      # unset. `${NPM_TOKEN}` is expanded by pnpm/npm at publish time, so the
+      # token value is never written to disk.
+      - name: Configure npm token auth
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' >> .npmrc
       # Publish binding platform packages, then the main package (which
       # optionalDepends on them), then jest/vitest (which depend on transform).
       # Idempotent: a package is skipped only when this exact version already
