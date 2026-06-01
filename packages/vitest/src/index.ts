@@ -13,7 +13,7 @@ export interface OxcAngularOptions {
    * it is auto-enabled if vitest is run with the `istanbul` coverage provider.
    */
   coverage?: boolean;
-  /** Path to a tsconfig to derive target / module / decorator flags from. */
+  /** Path to a tsconfig to derive target / decorator flags from. */
   tsconfig?: string;
   /**
    * Files whose id matches are loaded as a default-exported string module (raw
@@ -21,8 +21,12 @@ export interface OxcAngularOptions {
    * Default matches `.html` and `.svg`.
    */
   stringifyContentPathRegex?: RegExp;
-  /** Override individual transform options forwarded to the Rust transform. */
-  transform?: Partial<TransformOptions>;
+  /**
+   * Override individual transform options forwarded to the Rust transform.
+   * `importMode` / `esm` are intentionally excluded: Vitest always runs native
+   * ESM, so this plugin only ever emits ESM (`import` mode).
+   */
+  transform?: Partial<Omit<TransformOptions, 'importMode' | 'esm'>>;
 }
 
 // Vitest augments Vite's resolved config with a `test` field; type the slice we
@@ -36,7 +40,8 @@ interface VitestAwareConfig {
  * files (resource inlining, decorator downleveling, signal initializer APIs)
  * and loads component `templateUrl` HTML as a string module.
  *
- * Defaults to ESM `import` mode (the natural fit for Vitest). Pass `{ tsconfig }`
+ * Always emits ESM (`import` mode) — Vitest runs native ESM, so there is no CJS
+ * path here (the module kind is never taken from tsconfig). Pass `{ tsconfig }`
  * to derive `target` / decorator flags from the project tsconfig (explicit
  * `transform` overrides win). Coverage is auto-enabled when vitest runs with the
  * `istanbul` provider; pass `{ coverage: true | false }` to force it.
@@ -72,11 +77,13 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
       filter: { id: { include: TS_RE, exclude: NODE_MODULES_RE } },
       handler(code: string, id: string) {
         const opts: TransformOptions = {
-          importMode: 'import',
-          esm: true,
           ...derived,
           coverage: options.coverage ?? autoCoverage,
           ...options.transform,
+          // Vitest runs native ESM: force `import` mode last so neither the
+          // tsconfig-derived options nor an explicit override can select CJS.
+          importMode: 'import',
+          esm: true,
         };
         const out = transform(code, id.split('?')[0]!, opts);
         if (out.errors && out.errors.length > 0) {
