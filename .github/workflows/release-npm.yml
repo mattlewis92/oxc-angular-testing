@@ -1,0 +1,130 @@
+name: Release npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 1.2.3 or 1.2.3-beta.0; a leading v is stripped)."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest, target: aarch64-apple-darwin }
+          - { runner: macos-latest, target: x86_64-apple-darwin }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: true }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc }
+          - { runner: windows-latest, target: aarch64-pc-windows-msvc }
+          - { runner: ubuntu-latest, target: wasm32-wasip1-threads }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install
+      - name: Build (${{ matrix.target }})
+        working-directory: crates/ng-transform-napi
+        run: >-
+          pnpm exec napi build --platform --release
+          --target ${{ matrix.target }}
+          ${{ matrix.cross && '--use-napi-cross' || '' }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bindings-${{ matrix.target }}
+          path: |
+            crates/ng-transform-napi/*.node
+            crates/ng-transform-napi/*.wasm
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm (OIDC)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+      - run: pnpm install
+      - name: Resolve release version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          version="${version#v}" # strip an optional leading v
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid version '$version' (expected semver like 1.2.3)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Stamp the version across all three packages BEFORE napi prepublish, which
+      # propagates it to the platform packages + optionalDependencies. pnpm then
+      # rewrites jest/vitest's `workspace:*` transform dep to this exact version.
+      - name: Set package versions
+        run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+      - name: Move binaries into the binding package
+        working-directory: crates/ng-transform-napi
+        run: pnpm exec napi artifacts --output-dir ../../artifacts --npm-dir npm
+      - name: Create platform npm dirs / update optionalDependencies
+        working-directory: crates/ng-transform-napi
+        run: pnpm exec napi prepublish -t npm --skip-gh-release
+      # Publish binding platform packages, then the main package (which
+      # optionalDepends on them), then jest/vitest (which depend on transform).
+      # Idempotent: a package is skipped only when this exact version already
+      # exists on npm (so a re-run after a partial failure completes the rest);
+      # any other publish error fails the job.
+      - name: Publish to npm
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          publish() {
+            local dir="$1" name
+            name="$(node -p "require('./${dir}/package.json').name")"
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "::notice::${name}@${VERSION} already published — skipping"
+            else
+              pnpm publish "$dir" --access public --provenance --no-git-checks
+            fi
+          }
+          for dir in crates/ng-transform-napi/npm/*/; do
+            publish "${dir%/}"
+          done
+          publish crates/ng-transform-napi
+          publish packages/jest
+          publish packages/vitest

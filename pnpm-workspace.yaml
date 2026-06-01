@@ -1,0 +1,6 @@
+packages:
+  - "crates/ng-transform-napi"
+  - "packages/*"
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true

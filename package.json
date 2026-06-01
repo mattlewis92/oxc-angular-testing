@@ -1,0 +1,20 @@
+{
+  "name": "@oxc-angular-testing/monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fast Angular test transforms via oxc (Rust + napi)",
+  "packageManager": "pnpm@11.0.0",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,29 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules
+.pnpm-store
+
+# napi build artifacts (restored from CI artifacts at publish time)
+*.node
+*.wasm
+crates/ng-transform-napi/index.js
+crates/ng-transform-napi/index.d.ts
+crates/ng-transform-napi/browser.js
+crates/ng-transform-napi/*.wasi.cjs
+crates/ng-transform-napi/*.wasi-browser.js
+crates/ng-transform-napi/wasi-worker.mjs
+crates/ng-transform-napi/wasi-worker-browser.mjs
+
+# Build output
+dist
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+*.log
+
+# insta pending snapshots
+**/*.snap.new

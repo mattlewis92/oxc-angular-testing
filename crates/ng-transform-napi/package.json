@@ -1,0 +1,64 @@
+{
+  "name": "@oxc-angular-testing/transform",
+  "version": "0.0.0",
+  "description": "Fast Angular test transforms (resource inlining, decorator downleveling, signal initializer APIs) on oxc, with optional istanbul coverage instrumentation in a single AST pass.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mattlewis/oxc-angular-testing.git",
+    "directory": "crates/ng-transform-napi"
+  },
+  "type": "commonjs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./tsconfig": {
+      "types": "./dist/tsconfig.d.ts",
+      "default": "./dist/tsconfig.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "dist"
+  ],
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "dependencies": {
+    "@oxc-project/runtime": "^0.134.0"
+  },
+  "napi": {
+    "binaryName": "transform",
+    "packageName": "@oxc-angular-testing/binding",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "wasm32-wasip1-threads"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release && tsc -p tsconfig.json",
+    "build:debug": "napi build --platform && tsc -p tsconfig.json",
+    "build:ts": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "tsc -p tsconfig.json",
+    "artifacts": "napi artifacts",
+    "test": "node --experimental-strip-types --test test/transform.test.mts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.6.2",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
