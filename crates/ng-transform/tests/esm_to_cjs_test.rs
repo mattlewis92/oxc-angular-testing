@@ -110,6 +110,20 @@ fn export_star_uses_export_star_helper() {
 }
 
 #[test]
+fn reexport_of_imported_binding_uses_namespace() {
+    // `import { X } from './m'; export { X };` — the import is rewritten to
+    // `m_1`, so the re-export must reference `m_1.X`, not a bare (undefined) `X`.
+    // Regression: @angular/core re-exports imported bindings like REACTIVE_NODE.
+    let code = cjs("import { X } from './m';\nexport { X };\nconst y = { ...X };\n");
+    assert!(code.contains("exports.X = m_1.X"), "{code}");
+    assert!(
+        !code.contains("exports.X = X;"),
+        "bare re-export is undefined: {code}"
+    );
+    assert!(code.contains("...m_1.X"), "{code}");
+}
+
+#[test]
 fn same_source_imported_and_reexported_requires_once() {
     // `import {helper} from './h'` + `export {helper} from './h'` must emit the
     // `const h_1 = require("./h")` exactly once (no duplicate declaration).

@@ -208,6 +208,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
                     &mut used_names,
                     &mut exported_names,
                     &mut emitted_requires,
+                    &replacements,
                     ast,
                     &mut body,
                 );
@@ -419,12 +420,14 @@ fn rewrite_import<'a>(
     out.push(const_decl(&ns_var, init, ast));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_export_named<'a>(
     export: oxc_ast::ast::ExportNamedDeclaration<'a>,
     module_vars: &mut HashMap<String, String>,
     used_names: &mut HashMap<String, u32>,
     exported_names: &mut Vec<String>,
     emitted: &mut std::collections::HashSet<String>,
+    replacements: &HashMap<String, Replacement>,
     ast: AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
 ) {
@@ -463,15 +466,18 @@ fn rewrite_export_named<'a>(
         return;
     }
 
-    // `export { x, y as z }` — assign from locals.
+    // `export { x, y as z }` — assign from locals. If a local is actually an
+    // imported binding (e.g. `import { X } from './m'; export { X };`), the
+    // import was rewritten to `_m.X`, so re-export through the namespace rather
+    // than a now-undefined bare identifier.
     for spec in &export.specifiers {
         let local = spec.local.name();
         let exported = spec.exported.name();
-        out.push(assign_export_stmt(
-            exported.as_str(),
-            ident(local.as_str(), ast),
-            ast,
-        ));
+        let value = match replacements.get(local.as_str()) {
+            Some(repl) => member(&repl.ns_var, &repl.member, ast),
+            None => ident(local.as_str(), ast),
+        };
+        out.push(assign_export_stmt(exported.as_str(), value, ast));
         exported_names.push(exported.as_str().to_string());
     }
 }
