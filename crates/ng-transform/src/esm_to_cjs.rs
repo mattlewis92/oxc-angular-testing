@@ -219,21 +219,22 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
                 needs.export_star = true;
                 // `export * from "m"` → `__exportStar(require("m"), exports);`
                 // (named `export * as ns` handled as a namespace export.)
+                let span = export.span;
                 if let Some(name) = &export.exported {
                     // export * as ns from "m"
-                    let req = require_call(export.source.value.as_str(), ast);
+                    let req = require_call_at(export.source.value.as_str(), span, ast);
                     let star = call(ident("__importStar", ast), vec![req], ast);
                     needs.import_star = true;
                     body.push(assign_export_stmt(name.name().as_str(), star, ast));
                     exported_names.push(name.name().as_str().to_string());
                 } else {
-                    let req = require_call(export.source.value.as_str(), ast);
+                    let req = require_call_at(export.source.value.as_str(), span, ast);
                     let call_expr = call(
                         ident("__exportStar", ast),
                         vec![req, ident("exports", ast)],
                         ast,
                     );
-                    body.push(ast.statement_expression(SPAN, call_expr));
+                    body.push(ast.statement_expression(span, call_expr));
                 }
             }
             other => body.push(other),
@@ -385,10 +386,11 @@ fn rewrite_import<'a>(
     out: &mut Vec<Statement<'a>>,
 ) {
     let source = import.source.value.as_str();
+    let span = import.span;
     let Some(specifiers) = &import.specifiers else {
         // side-effect import → `require("…");` (skip if already required).
         if emitted.insert(source.to_string()) {
-            out.push(ast.statement_expression(SPAN, require_call(source, ast)));
+            out.push(ast.statement_expression(span, require_call_at(source, span, ast)));
         }
         return;
     };
@@ -419,7 +421,7 @@ fn rewrite_import<'a>(
         // Already required (e.g. also re-exported) — references use the same var.
         return;
     }
-    let req = require_call(source, ast);
+    let req = require_call_at(source, span, ast);
     // Match tsc's esModuleInterop: namespace or mixed default+named → __importStar
     // (the namespace is needed for both); default only → __importDefault; named
     // only → plain require.
@@ -432,7 +434,7 @@ fn rewrite_import<'a>(
     } else {
         req
     };
-    out.push(const_decl(&ns_var, init, ast));
+    out.push(const_decl_at(&ns_var, init, span, ast));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -455,7 +457,12 @@ fn rewrite_export_named<'a>(
             .clone();
         // Require the source once (it may also have been imported).
         if emitted.insert(src.to_string()) {
-            out.push(const_decl(&ns_var, require_call(src, ast), ast));
+            out.push(const_decl_at(
+                &ns_var,
+                require_call_at(src, export.span, ast),
+                export.span,
+                ast,
+            ));
         }
         for spec in &export.specifiers {
             let local = spec.local.name();
@@ -633,9 +640,13 @@ fn call<'a>(
     ast.expression_call(SPAN, callee, NONE, a, false)
 }
 
-fn require_call<'a>(source: &str, ast: AstBuilder<'a>) -> Expression<'a> {
-    let arg = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(source), None);
-    call(ident("require", ast), vec![arg], ast)
+/// Builds `require("…")`, stamping the call with `span` so a module that throws
+/// while loading reports the original `import`/`export … from` statement as the
+/// stack frame, matching tsc.
+fn require_call_at<'a>(source: &str, span: oxc_span::Span, ast: AstBuilder<'a>) -> Expression<'a> {
+    let arg = ast.expression_string_literal(span, ast.allocator.alloc_str(source), None);
+    let callee = ast.expression_identifier(span, "require");
+    ast.expression_call(span, callee, NONE, ast.vec1(Argument::from(arg)), false)
 }
 
 /// `(0, expr)` sequence — strips `this` from a method-style callee.
@@ -651,10 +662,17 @@ fn sequence_zero<'a>(expr: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a
     ast.expression_sequence(SPAN, items)
 }
 
-fn const_decl<'a>(name: &str, init: Expression<'a>, ast: AstBuilder<'a>) -> Statement<'a> {
-    let id = ast.binding_pattern_binding_identifier(SPAN, ast.allocator.alloc_str(name));
+/// Builds `const <name> = …;`, stamping the statement with `span` (used for
+/// `const m_1 = require("…")`, so the declaration maps to the original import).
+fn const_decl_at<'a>(
+    name: &str,
+    init: Expression<'a>,
+    span: oxc_span::Span,
+    ast: AstBuilder<'a>,
+) -> Statement<'a> {
+    let id = ast.binding_pattern_binding_identifier(span, ast.allocator.alloc_str(name));
     let declarator = ast.variable_declarator(
-        SPAN,
+        span,
         VariableDeclarationKind::Const,
         id,
         NONE,
@@ -663,7 +681,7 @@ fn const_decl<'a>(name: &str, init: Expression<'a>, ast: AstBuilder<'a>) -> Stat
     );
     let mut decls = ast.vec();
     decls.push(declarator);
-    Statement::from(ast.declaration_variable(SPAN, VariableDeclarationKind::Const, decls, false))
+    Statement::from(ast.declaration_variable(span, VariableDeclarationKind::Const, decls, false))
 }
 
 /// `exports.<name> = <value>;`

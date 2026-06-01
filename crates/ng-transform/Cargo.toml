@@ -24,3 +24,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
+oxc_sourcemap = "6"

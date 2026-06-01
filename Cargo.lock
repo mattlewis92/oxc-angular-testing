@@ -480,6 +480,7 @@ dependencies = [
  "oxc_coverage_instrument",
  "oxc_parser",
  "oxc_semantic",
+ "oxc_sourcemap",
  "oxc_span",
  "oxc_syntax",
  "oxc_transformer",
