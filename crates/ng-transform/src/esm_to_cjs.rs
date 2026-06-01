@@ -135,7 +135,6 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
             module_vars
                 .entry(source.clone())
                 .or_insert_with(|| ns.local.name.as_str().to_string());
-            needs.import_star = true;
         }
         let ns_var = module_vars
             .entry(source.clone())
@@ -153,7 +152,6 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
                     );
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                    needs.import_default = true;
                     replacements.insert(
                         s.local.name.as_str().to_string(),
                         Replacement {
@@ -397,9 +395,21 @@ fn rewrite_import<'a>(
         .get(source)
         .cloned()
         .unwrap_or_else(|| source.to_string());
-    let has_default = specifiers
-        .iter()
-        .any(|s| matches!(s, ImportDeclarationSpecifier::ImportDefaultSpecifier(_)));
+    // A default import via `import x from` OR `import { default as x }`.
+    let has_default = specifiers.iter().any(|s| match s {
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => true,
+        ImportDeclarationSpecifier::ImportSpecifier(spec) => {
+            spec.imported.name().as_str() == "default"
+        }
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => false,
+    });
+    // A non-default named import (`import { foo }`).
+    let has_named = specifiers.iter().any(|s| match s {
+        ImportDeclarationSpecifier::ImportSpecifier(spec) => {
+            spec.imported.name().as_str() != "default"
+        }
+        _ => false,
+    });
     let has_namespace = specifiers
         .iter()
         .any(|s| matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)));
@@ -409,7 +419,10 @@ fn rewrite_import<'a>(
         return;
     }
     let req = require_call(source, ast);
-    let init = if has_namespace {
+    // Match tsc's esModuleInterop: namespace or mixed default+named → __importStar
+    // (the namespace is needed for both); default only → __importDefault; named
+    // only → plain require.
+    let init = if has_namespace || (has_default && has_named) {
         needs.import_star = true;
         call(ident("__importStar", ast), vec![req], ast)
     } else if has_default {

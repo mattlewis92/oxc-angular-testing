@@ -45,6 +45,36 @@ fn default_import_uses_interop_and_call_wrapper() {
 }
 
 #[test]
+fn default_via_named_specifier_uses_interop() {
+    // `import { default as moment } from 'm'` is a default import (common with
+    // moment-timezone). Must use __importDefault, not a bare `m_1.default`.
+    let code = cjs("import { default as moment } from 'm';\nmoment();");
+    assert!(code.contains("__importDefault"), "{code}");
+    assert!(
+        code.contains(r#"const m_1 = __importDefault(require("m"))"#),
+        "{code}"
+    );
+    assert!(code.contains("(0, m_1.default)()"), "{code}");
+}
+
+#[test]
+fn mixed_default_and_named_uses_import_star() {
+    // default + named together → __importStar (the namespace is needed for both),
+    // matching tsc — __importDefault would lack the named members.
+    let code = cjs("import def, { named } from 'm';\ndef();\nnamed();");
+    assert!(
+        code.contains(r#"const m_1 = __importStar(require("m"))"#),
+        "{code}"
+    );
+    assert!(code.contains("(0, m_1.default)()"), "{code}");
+    assert!(code.contains("(0, m_1.named)()"), "{code}");
+    assert!(
+        !code.contains("__importDefault"),
+        "should be star, not default: {code}"
+    );
+}
+
+#[test]
 fn namespace_import_uses_import_star() {
     let code = cjs("import * as ns from './m';\nns.x();");
     assert!(code.contains("__importStar"), "{code}");
