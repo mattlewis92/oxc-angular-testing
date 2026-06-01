@@ -528,14 +528,13 @@ fn rewrite_export_default<'a>(
 fn declaration_binding_names(decl: &oxc_ast::ast::Declaration<'_>) -> Vec<String> {
     use oxc_ast::ast::Declaration as D;
     match decl {
-        D::VariableDeclaration(v) => v
-            .declarations
-            .iter()
-            .filter_map(|d| match &d.id {
-                BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
-                _ => None,
-            })
-            .collect(),
+        D::VariableDeclaration(v) => {
+            let mut names = Vec::new();
+            for d in &v.declarations {
+                collect_binding_idents(&d.id, &mut names);
+            }
+            names
+        }
         D::FunctionDeclaration(f) => {
             f.id.as_ref()
                 .map(|i| vec![i.name.as_str().to_string()])
@@ -547,6 +546,32 @@ fn declaration_binding_names(decl: &oxc_ast::ast::Declaration<'_>) -> Vec<String
                 .unwrap_or_default()
         }
         _ => Vec::new(),
+    }
+}
+
+/// Collect every bound identifier in a binding pattern, recursing through object
+/// / array destructuring, defaults, and rest — so `export const { a, b } = …`
+/// and `export const [x, ...y] = …` export all of `a`, `b`, `x`, `y`.
+fn collect_binding_idents(pattern: &BindingPattern<'_>, out: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => out.push(id.name.as_str().to_string()),
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_idents(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_idents(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_binding_idents(elem, out);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_idents(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => collect_binding_idents(&assign.left, out),
     }
 }
 

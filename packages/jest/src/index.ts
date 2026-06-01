@@ -1,19 +1,7 @@
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
 import { deriveTransformOptions } from '@oxc-angular-testing/transform/tsconfig';
 import { version as transformVersion } from '@oxc-angular-testing/transform/package.json';
-
-// Cache-busting stamp: the transform version plus the binding's mtime, so a
-// local rebuild of the (unversioned, linked) transform always invalidates
-// jest's transform cache without needing `--clearCache`.
-const bindingStamp = (() => {
-  try {
-    return `${transformVersion}:${fs.statSync(require.resolve('@oxc-angular-testing/transform')).mtimeMs}`;
-  } catch {
-    return transformVersion;
-  }
-})();
 
 export interface OxcAngularJestOptions {
   /** `"auto"` (default), `"require"`, or `"import"`. */
@@ -113,7 +101,7 @@ export function createTransformer(
     getCacheKey(sourceText, sourcePath, options) {
       return crypto
         .createHash('sha1')
-        .update(bindingStamp)
+        .update(transformVersion)
         .update('\0')
         .update(JSON.stringify(transformerOptions))
         .update('\0')

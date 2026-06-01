@@ -79,6 +79,21 @@ fn export_function_and_class() {
 }
 
 #[test]
+fn export_destructuring_assigns_all_bindings() {
+    // Regression: ngrx `export const { selectUser, ... } = createFeature(...)`
+    // — every destructured binding (object, array, rename, rest) must be exported.
+    let code = cjs(
+        "export const { selectUser, b: renamed } = createFeature();\nexport const [first, , third, ...rest] = arr;\n",
+    );
+    for name in ["selectUser", "renamed", "first", "third", "rest"] {
+        assert!(
+            code.contains(&format!("exports.{name} = {name}")),
+            "missing export of `{name}`:\n{code}"
+        );
+    }
+}
+
+#[test]
 fn export_default_expression() {
     let code = cjs("export default 42;");
     assert!(code.contains("exports.default = 42"), "{code}");
