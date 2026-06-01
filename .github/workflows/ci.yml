@@ -47,3 +47,24 @@ jobs:
         run: pnpm --filter @oxc-angular-testing/vitest test
       - name: Test jest plugin
         run: pnpm --filter @oxc-angular-testing/jest test
+
+  # Single required status check for branch protection. Runs even when a
+  # dependency fails or the run is cancelled (`if: always()`), and fails unless
+  # both jobs succeeded — so a cancelled run or a failed/skipped job blocks the
+  # merge instead of silently passing.
+  ci-success:
+    name: CI success
+    if: ${{ always() }}
+    needs: [rust, node]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify rust + node succeeded
+        run: |
+          echo "rust=${{ needs.rust.result }} node=${{ needs.node.result }} cancelled=${{ cancelled() }}"
+          if [ "${{ cancelled() }}" = "true" ] \
+            || [ "${{ needs.rust.result }}" != "success" ] \
+            || [ "${{ needs.node.result }}" != "success" ]; then
+            echo "::error::CI failed — a job did not succeed or the run was cancelled."
+            exit 1
+          fi
+          echo "All CI jobs passed."
