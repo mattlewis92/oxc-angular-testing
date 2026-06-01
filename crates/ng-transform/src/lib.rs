@@ -148,9 +148,12 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         };
         match instrument_program(&allocator, &mut program, source, filename, &cov_opts) {
             Ok(result) => {
+                let (code, prefix_lines) = assemble_cjs(did_cjs, &cjs_prelude, result.code);
                 return TransformResult {
-                    code: assemble_cjs(did_cjs, &cjs_prelude, result.code),
-                    source_map: result.source_map,
+                    code,
+                    source_map: result
+                        .source_map
+                        .map(|map| offset_source_map(&map, prefix_lines)),
                     coverage_map: Some(result.coverage_map_json),
                     errors,
                 };
@@ -170,19 +173,106 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         .with_source_text(source)
         .build(&program);
 
+    let (code, prefix_lines) = assemble_cjs(did_cjs, &cjs_prelude, ret.code);
     TransformResult {
-        code: assemble_cjs(did_cjs, &cjs_prelude, ret.code),
-        source_map: ret.map.map(|map| map.to_json_string()),
+        code,
+        source_map: ret
+            .map
+            .map(|map| offset_source_map(&map.to_json_string(), prefix_lines)),
         coverage_map: None,
         errors,
     }
 }
 
 /// In CJS mode, prepend `"use strict";` and the interop helper prelude.
-fn assemble_cjs(did_cjs: bool, prelude: &str, code: String) -> String {
+///
+/// Returns the assembled code and the number of lines prepended ahead of the
+/// generated code, so the source map can be shifted to match (see
+/// [`offset_source_map`]).
+fn assemble_cjs(did_cjs: bool, prelude: &str, code: String) -> (String, usize) {
     if did_cjs {
-        format!("\"use strict\";\n{prelude}{code}")
+        let prefix = format!("\"use strict\";\n{prelude}");
+        let prefix_lines = prefix.bytes().filter(|&b| b == b'\n').count();
+        (format!("{prefix}{code}"), prefix_lines)
     } else {
-        code
+        (code, 0)
+    }
+}
+
+/// Shift every mapping in a source map down by `lines` generated lines.
+///
+/// We prepend `"use strict";` + interop helpers as raw text after codegen, so
+/// the generated code starts `lines` rows lower than the map (built against the
+/// codegen output) assumes. A VLQ `mappings` string encodes generated lines as
+/// `;`-separated groups, so prepending `lines` semicolons inserts that many
+/// empty leading lines — without disturbing the (file-relative) source/name
+/// deltas, which only advance on real segments. No-op when `lines == 0`.
+fn offset_source_map(map_json: &str, lines: usize) -> String {
+    if lines == 0 {
+        return map_json.to_string();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(map_json) else {
+        return map_json.to_string();
+    };
+    if let Some(mappings) = value.get_mut("mappings").and_then(|m| m.as_str()) {
+        let shifted = format!("{};{mappings}", ";".repeat(lines - 1));
+        value["mappings"] = serde_json::Value::String(shifted);
+    }
+    value.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_prepends_semicolons_without_touching_source_deltas() {
+        let map = r#"{"version":3,"sources":["m.ts"],"names":[],"mappings":"AAAA,CAAC;AACD"}"#;
+        let out = offset_source_map(map, 4);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let mappings = value["mappings"].as_str().unwrap();
+        // 4 leading empty lines, then the original mappings unchanged.
+        assert_eq!(mappings, ";;;;AAAA,CAAC;AACD");
+    }
+
+    #[test]
+    fn offset_zero_is_a_no_op() {
+        let map = r#"{"version":3,"sources":["m.ts"],"names":[],"mappings":"AAAA"}"#;
+        assert_eq!(offset_source_map(map, 0), map);
+    }
+
+    #[test]
+    fn cjs_source_map_is_shifted_by_the_prelude() {
+        // A default import emits `"use strict";` + the `__importDefault` helper
+        // ahead of the generated code, so the map must gain that many empty
+        // leading lines — otherwise every position is reported too high.
+        let opts = TransformOptions {
+            import_mode: ImportMode::Require,
+            esm: false,
+            target: "es2022".to_string(),
+            jit_transforms: false,
+            source_map: true,
+            ..TransformOptions::default()
+        };
+        let out = transform("import d from './m';\nd();\n", "m.ts", &opts);
+        let map = out.source_map.expect("source map");
+        let value: serde_json::Value = serde_json::from_str(&map).unwrap();
+        let mappings = value["mappings"].as_str().unwrap();
+        let lead = mappings.bytes().take_while(|&b| b == b';').count();
+        // The generated code starts this many lines down (`"use strict";` + the
+        // multi-line `__importDefault` helper, before the `__esModule` marker).
+        let prelude_lines = out
+            .code
+            .lines()
+            .take_while(|l| !l.contains("__esModule"))
+            .count();
+        assert!(prelude_lines >= 2, "sanity: prelude present");
+        // Without the offset, `lead` would only cover codegen's own unmapped
+        // header (< prelude_lines); the fix shifts the whole map down past the
+        // prepended prelude.
+        assert!(
+            lead >= prelude_lines,
+            "map not shifted by the prelude: {lead} leading lines < prelude height {prelude_lines}: {mappings}"
+        );
     }
 }

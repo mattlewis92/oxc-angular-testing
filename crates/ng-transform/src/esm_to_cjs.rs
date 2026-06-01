@@ -29,7 +29,7 @@ use oxc_ast::ast::{
     VariableDeclarationKind,
 };
 use oxc_semantic::{Scoping, SemanticBuilder};
-use oxc_span::SPAN;
+use oxc_span::{GetSpan, SPAN};
 use oxc_syntax::symbol::SymbolId;
 use oxc_traverse::{Traverse, TraverseCtx, traverse_mut};
 
@@ -334,7 +334,8 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
             && let Some(repl) = self.callee_replacement(&call_expr.callee, ctx)
         {
             let ast = ctx.ast;
-            let member = member(&repl.ns_var, &repl.member, ast);
+            let span = call_expr.callee.span();
+            let member = member_at(&repl.ns_var, &repl.member, span, ast);
             call_expr.callee = sequence_zero(member, ast);
             return;
         }
@@ -344,7 +345,7 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
         let Some(repl) = self.reference_replacement(id.reference_id.get(), ctx) else {
             return;
         };
-        *expr = member(&repl.ns_var, &repl.member, ctx.ast);
+        *expr = member_at(&repl.ns_var, &repl.member, id.span, ctx.ast);
     }
 }
 
@@ -599,10 +600,22 @@ fn undefined<'a>(ast: AstBuilder<'a>) -> Expression<'a> {
 }
 
 fn member<'a>(object: &str, property: &str, ast: AstBuilder<'a>) -> Expression<'a> {
+    member_at(object, property, SPAN, ast)
+}
+
+/// Like [`member`] but stamps the rewritten `object.property` with `span` so the
+/// source map points back at the original reference (e.g. the `moment` token
+/// that became `moment_1.default`) instead of mapping to position 0.
+fn member_at<'a>(
+    object: &str,
+    property: &str,
+    span: oxc_span::Span,
+    ast: AstBuilder<'a>,
+) -> Expression<'a> {
     ast.member_expression_static(
-        SPAN,
-        ident(object, ast),
-        ast.identifier_name(SPAN, ast.allocator.alloc_str(property)),
+        span,
+        ast.expression_identifier(span, ast.allocator.alloc_str(object)),
+        ast.identifier_name(span, ast.allocator.alloc_str(property)),
         false,
     )
     .into()
