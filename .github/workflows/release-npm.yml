@@ -108,9 +108,13 @@ jobs:
       - name: Move binaries into the platform packages
         working-directory: crates/ng-transform-napi
         run: pnpm exec napi artifacts --output-dir ../../artifacts --npm-dir npm
+      # Update the main package's optionalDependencies + stamp each platform
+      # package.json (os/cpu/version). `--skip-optional-publish`: napi would
+      # otherwise publish the platform packages itself — we publish everything in
+      # the idempotent step below instead.
       - name: Update optionalDependencies
         working-directory: crates/ng-transform-napi
-        run: pnpm exec napi prepublish -t npm --skip-gh-release
+        run: pnpm exec napi prepublish -t npm --npm-dir npm --skip-optional-publish
       # Token auth for the bootstrap release; skipped (→ OIDC) when the secret is
       # unset. `${NPM_TOKEN}` is expanded by pnpm/npm at publish time, so the
       # token value is never written to disk.
