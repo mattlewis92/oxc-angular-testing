@@ -99,10 +99,16 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
-      - name: Move binaries into the binding package
+      # Order matters: create the npm/<platform> dirs first, then drop the
+      # downloaded .node binaries into them, then update the main package's
+      # optionalDependencies. (`napi artifacts` writes into existing dirs.)
+      - name: Create platform npm dirs
+        working-directory: crates/ng-transform-napi
+        run: pnpm exec napi create-npm-dirs --npm-dir npm
+      - name: Move binaries into the platform packages
         working-directory: crates/ng-transform-napi
         run: pnpm exec napi artifacts --output-dir ../../artifacts --npm-dir npm
-      - name: Create platform npm dirs / update optionalDependencies
+      - name: Update optionalDependencies
         working-directory: crates/ng-transform-napi
         run: pnpm exec napi prepublish -t npm --skip-gh-release
       # Token auth for the bootstrap release; skipped (→ OIDC) when the secret is
