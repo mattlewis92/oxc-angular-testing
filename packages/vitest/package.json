@@ -13,7 +13,7 @@
   "files": ["dist"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mattlewis/oxc-angular-testing.git",
+    "url": "git+https://github.com/mattlewis92/oxc-angular-testing.git",
     "directory": "packages/vitest"
   },
   "engines": {
