@@ -14,6 +14,13 @@ export interface OxcAngularJestOptions {
   tsconfig?: string;
   /** Extra regex sources marking files as ESM dependencies to downlevel. */
   processEsmModules?: string[];
+  /**
+   * Files whose path matches this regex are returned as a string module (their
+   * raw content) instead of being compiled — for component `templateUrl` HTML
+   * and inline SVG. Mirrors jest-preset-angular's `stringifyContentPathRegex`.
+   * Default: `\\.(html|svg)$`. Set to `null`/`''` to disable.
+   */
+  stringifyContentPathRegex?: string | null;
   /** Override individual transform options forwarded to the Rust transform. */
   transform?: Partial<TransformOptions>;
 }
@@ -75,6 +82,18 @@ export function createTransformer(
   const derived = transformerOptions.tsconfig
     ? deriveTransformOptions(transformerOptions.tsconfig)
     : {};
+  const importMode = transformerOptions.importMode || derived.importMode || 'auto';
+  const esm = transformerOptions.esm ?? derived.esm ?? false;
+  // Resolve whether output modules are ESM (controls the stringified module form).
+  const esmOutput =
+    importMode === 'import' ? true : importMode === 'require' ? false : esm;
+  // `null`/`''` disables stringification.
+  const stringifyPattern =
+    transformerOptions.stringifyContentPathRegex === undefined
+      ? '\\.(html|svg)$'
+      : transformerOptions.stringifyContentPathRegex;
+  const stringifyRe = stringifyPattern ? new RegExp(stringifyPattern) : null;
+
   return {
     canInstrument: true,
     // Include the native transform version so jest's transform cache is
@@ -96,12 +115,21 @@ export function createTransformer(
         .digest('hex');
     },
     process(sourceText, sourcePath, options) {
+      // Component templateUrl HTML / inline SVG: return the raw content as a
+      // string module rather than compiling it (which would parse `<svg>` etc.
+      // as code).
+      if (stringifyRe?.test(sourcePath)) {
+        const literal = JSON.stringify(sourceText);
+        return {
+          code: esmOutput ? `export default ${literal};` : `module.exports = ${literal};`,
+        };
+      }
       const collectCoverage = Boolean(options?.instrument);
       const isDep = isEsmDependency(sourcePath, transformerOptions.processEsmModules);
       const opts: TransformOptions = {
         ...derived,
-        importMode: transformerOptions.importMode || derived.importMode || 'auto',
-        esm: transformerOptions.esm ?? derived.esm ?? false,
+        importMode,
+        esm,
         coverage: collectCoverage || Boolean(transformerOptions.coverage),
         // ESM deps are plain JS: only downlevel the module format, skip the
         // Angular JIT passes (they'd be no-ops but cost a traversal).

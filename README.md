@@ -134,6 +134,11 @@ lowering, coverage) plus the jest/vitest integration suites.
 - **`useDefineForClassFields: false`** (the default, Angular's setting) emits class
   fields as plain assignments (oxc `set_public_class_fields` +
   `remove_class_fields_without_initializer`).
+- **Content stringification** — files matching `stringifyContentPathRegex`
+  (default `\.(html|svg)$`) are returned as a string module (their raw content)
+  rather than compiled, so component `templateUrl` HTML and inline SVG imports
+  work. The jest presets route `.html`/`.svg` through this; the vitest plugin's
+  `load` hook does the same. Mirrors jest-preset-angular's option of the same name.
 
 ## Development
 

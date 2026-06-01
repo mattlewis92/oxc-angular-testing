@@ -4,8 +4,8 @@ import { deriveTransformOptions } from '@oxc-angular-testing/transform/tsconfig'
 import type { Plugin, ResolvedConfig } from 'vite';
 
 const TS_RE = /\.[cm]?tsx?(\?|$)/;
-const HTML_RE = /\.html(\?|$)/;
 const NODE_MODULES_RE = /\/node_modules\//;
+const DEFAULT_STRINGIFY_RE = /\.(html|svg)(\?|$)/;
 
 export interface OxcAngularOptions {
   /**
@@ -15,6 +15,12 @@ export interface OxcAngularOptions {
   coverage?: boolean;
   /** Path to a tsconfig to derive target / module / decorator flags from. */
   tsconfig?: string;
+  /**
+   * Files whose id matches are loaded as a default-exported string module (raw
+   * content) instead of compiled — component `templateUrl` HTML and inline SVG.
+   * Default matches `.html` and `.svg`.
+   */
+  stringifyContentPathRegex?: RegExp;
   /** Override individual transform options forwarded to the Rust transform. */
   transform?: Partial<TransformOptions>;
 }
@@ -37,6 +43,7 @@ interface VitestAwareConfig {
  */
 export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
   const derived = options.tsconfig ? deriveTransformOptions(options.tsconfig) : {};
+  const stringifyRe = options.stringifyContentPathRegex ?? DEFAULT_STRINGIFY_RE;
   let autoCoverage = false;
 
   return {
@@ -50,9 +57,9 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
       autoCoverage = cov?.enabled === true && cov.provider === 'istanbul';
     },
 
-    // Load component `templateUrl` HTML as a default-exported string module.
+    // Load component `templateUrl` HTML / inline SVG as a string module.
     load: {
-      filter: { id: HTML_RE },
+      filter: { id: stringifyRe },
       handler(id: string) {
         const file = id.split('?')[0]!;
         const src = fs.readFileSync(file, 'utf8');
