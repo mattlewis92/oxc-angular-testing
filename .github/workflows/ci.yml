@@ -51,20 +51,24 @@ jobs:
   # Single required status check for branch protection. Runs even when a
   # dependency fails or the run is cancelled (`if: always()`), and fails unless
   # both jobs succeeded — so a cancelled run or a failed/skipped job blocks the
-  # merge instead of silently passing.
+  # merge instead of silently passing. (`cancelled()` is only valid in an `if:`,
+  # not inside a `run:` expression.)
   ci-success:
-    name: CI success
+    name: CI succeeded
     if: ${{ always() }}
     needs: [rust, node]
     runs-on: ubuntu-latest
     steps:
+      - name: Fail if the run was cancelled
+        if: ${{ cancelled() }}
+        run: |
+          echo "::error::CI run was cancelled."
+          exit 1
       - name: Verify rust + node succeeded
         run: |
-          echo "rust=${{ needs.rust.result }} node=${{ needs.node.result }} cancelled=${{ cancelled() }}"
-          if [ "${{ cancelled() }}" = "true" ] \
-            || [ "${{ needs.rust.result }}" != "success" ] \
-            || [ "${{ needs.node.result }}" != "success" ]; then
-            echo "::error::CI failed — a job did not succeed or the run was cancelled."
+          echo "rust=${{ needs.rust.result }} node=${{ needs.node.result }}"
+          if [ "${{ needs.rust.result }}" != "success" ] || [ "${{ needs.node.result }}" != "success" ]; then
+            echo "::error::CI failed — a job did not succeed."
             exit 1
           fi
           echo "All CI jobs passed."
