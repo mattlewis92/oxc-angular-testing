@@ -26,26 +26,26 @@ jobs:
           - { runner: windows-latest, target: aarch64-pc-windows-msvc }
           - { runner: ubuntu-latest, target: wasm32-wasip1-threads }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install
       - name: Build (${{ matrix.target }})
         working-directory: crates/ng-transform-napi
         run: >-
           pnpm exec napi build --platform --release
           --target ${{ matrix.target }}
           ${{ matrix.cross && '--use-napi-cross' || '' }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.target }}
           path: |
@@ -61,16 +61,15 @@ jobs:
       contents: read
       id-token: write # required for npm trusted publishing (OIDC)
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           registry-url: "https://registry.npmjs.org"
-      # Trusted publishing requires npm >= 11.5.1.
-      - run: npm install -g npm@latest
-      - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+          cache: pnpm
+      - run: pnpm install
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Move binaries into the binding package
@@ -84,14 +83,14 @@ jobs:
         working-directory: crates/ng-transform-napi
         run: |
           for dir in npm/*/; do
-            npm publish "$dir" --access public --provenance || true
+            pnpm publish "$dir" --access public --provenance --no-git-checks || true
           done
       - name: Publish @oxc-angular-testing/transform
         working-directory: crates/ng-transform-napi
-        run: npm publish --access public --provenance
+        run: pnpm publish --access public --provenance --no-git-checks
       - name: Publish @oxc-angular-testing/jest
         working-directory: packages/jest
-        run: npm publish --access public --provenance
+        run: pnpm publish --access public --provenance --no-git-checks
       - name: Publish @oxc-angular-testing/vitest
         working-directory: packages/vitest
-        run: npm publish --access public --provenance
+        run: pnpm publish --access public --provenance --no-git-checks
