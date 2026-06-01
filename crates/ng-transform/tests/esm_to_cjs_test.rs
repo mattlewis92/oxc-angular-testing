@@ -95,8 +95,17 @@ fn export_named_locals() {
 fn reexport_from_source() {
     let code = cjs("export { a, b as c } from './m';");
     assert!(code.contains(r#"const m_1 = require("./m")"#), "{code}");
-    assert!(code.contains("exports.a = m_1.a"), "{code}");
-    assert!(code.contains("exports.c = m_1.b"), "{code}");
+    // Lazy getters (circular-safe), matching TypeScript's `export … from`.
+    assert!(
+        code.contains(r#"Object.defineProperty(exports, "a""#),
+        "{code}"
+    );
+    assert!(code.contains("get: () => m_1.a"), "{code}");
+    assert!(
+        code.contains(r#"Object.defineProperty(exports, "c""#),
+        "{code}"
+    );
+    assert!(code.contains("get: () => m_1.b"), "{code}");
 }
 
 #[test]
@@ -115,7 +124,12 @@ fn reexport_of_imported_binding_uses_namespace() {
     // `m_1`, so the re-export must reference `m_1.X`, not a bare (undefined) `X`.
     // Regression: @angular/core re-exports imported bindings like REACTIVE_NODE.
     let code = cjs("import { X } from './m';\nexport { X };\nconst y = { ...X };\n");
-    assert!(code.contains("exports.X = m_1.X"), "{code}");
+    // Lazy getter through the namespace — circular-safe, never a bare `X`.
+    assert!(
+        code.contains(r#"Object.defineProperty(exports, "X""#),
+        "{code}"
+    );
+    assert!(code.contains("get: () => m_1.X"), "{code}");
     assert!(
         !code.contains("exports.X = X;"),
         "bare re-export is undefined: {code}"
@@ -130,7 +144,7 @@ fn same_source_imported_and_reexported_requires_once() {
     let code = cjs("import { helper } from './h';\nexport { helper } from './h';\nhelper();");
     let count = code.matches("require(\"./h\")").count();
     assert_eq!(count, 1, "require should appear once:\n{code}");
-    assert!(code.contains("exports.helper = h_1.helper"), "{code}");
+    assert!(code.contains("get: () => h_1.helper"), "{code}");
 }
 
 #[test]

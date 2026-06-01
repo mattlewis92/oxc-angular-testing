@@ -24,8 +24,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, BindingPattern, Expression, ImportDeclarationSpecifier, Program,
-    Statement, VariableDeclarationKind,
+    Argument, AssignmentTarget, BindingPattern, Expression, FormalParameterKind,
+    ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind, Statement,
+    VariableDeclarationKind,
 };
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::SPAN;
@@ -445,12 +446,12 @@ fn rewrite_export_named<'a>(
         for spec in &export.specifiers {
             let local = spec.local.name();
             let exported = spec.exported.name();
-            out.push(assign_export_stmt(
+            // Lazy getter so re-exports work across circular module graphs.
+            out.push(define_export_getter(
                 exported.as_str(),
                 member(&ns_var, local.as_str(), ast),
                 ast,
             ));
-            exported_names.push(exported.as_str().to_string());
         }
         return;
     }
@@ -473,12 +474,25 @@ fn rewrite_export_named<'a>(
     for spec in &export.specifiers {
         let local = spec.local.name();
         let exported = spec.exported.name();
-        let value = match replacements.get(local.as_str()) {
-            Some(repl) => member(&repl.ns_var, &repl.member, ast),
-            None => ident(local.as_str(), ast),
-        };
-        out.push(assign_export_stmt(exported.as_str(), value, ast));
-        exported_names.push(exported.as_str().to_string());
+        match replacements.get(local.as_str()) {
+            // Re-export of an imported binding → lazy getter (circular-safe).
+            Some(repl) => {
+                out.push(define_export_getter(
+                    exported.as_str(),
+                    member(&repl.ns_var, &repl.member, ast),
+                    ast,
+                ));
+            }
+            // Genuine local binding → eager assignment.
+            None => {
+                out.push(assign_export_stmt(
+                    exported.as_str(),
+                    ident(local.as_str(), ast),
+                    ast,
+                ));
+                exported_names.push(exported.as_str().to_string());
+            }
+        }
     }
 }
 
@@ -616,6 +630,55 @@ fn assign_export_stmt<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>
         value,
     );
     ast.statement_expression(SPAN, assign)
+}
+
+/// `() => <value>` arrow (used as a re-export getter body).
+fn arrow_getter<'a>(value: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
+    let params = ast.formal_parameters(
+        SPAN,
+        FormalParameterKind::ArrowFormalParameters,
+        ast.vec(),
+        NONE,
+    );
+    let mut stmts = ast.vec();
+    stmts.push(ast.statement_expression(SPAN, value));
+    let body = ast.function_body(SPAN, ast.vec(), stmts);
+    ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, body)
+}
+
+/// `Object.defineProperty(exports, "<name>", { enumerable: true, get: () => <value> });`
+///
+/// Used for re-exports so they resolve lazily — required for circular module
+/// graphs (e.g. ngrx selector barrels), matching TypeScript's `export … from`.
+fn define_export_getter<'a>(
+    name: &str,
+    value: Expression<'a>,
+    ast: AstBuilder<'a>,
+) -> Statement<'a> {
+    let mut props = ast.vec();
+    props.push(ast.object_property_kind_object_property(
+        SPAN,
+        PropertyKind::Init,
+        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "enumerable")),
+        ast.expression_boolean_literal(SPAN, true),
+        false,
+        false,
+        false,
+    ));
+    props.push(ast.object_property_kind_object_property(
+        SPAN,
+        PropertyKind::Init,
+        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "get")),
+        arrow_getter(value, ast),
+        false,
+        false,
+        false,
+    ));
+    let opts = ast.expression_object(SPAN, props);
+    let name_lit = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(name), None);
+    let define = member("Object", "defineProperty", ast);
+    let call_expr = call(define, vec![ident("exports", ast), name_lit, opts], ast);
+    ast.statement_expression(SPAN, call_expr)
 }
 
 /// `Object.defineProperty(exports, "__esModule", { value: true });`
