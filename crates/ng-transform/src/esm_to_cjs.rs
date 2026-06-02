@@ -166,8 +166,10 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
         let _ = has_namespace;
     }
 
-    // 2. Rewrite references to default/named import locals (symbol-aware).
-    if !replacements.is_empty() {
+    // 2. Rewrite references to default/named import locals (symbol-aware) and
+    //    rewrite dynamic `import()` → `require()`. Always runs: a dynamic import
+    //    can appear with no static imports (so `replacements` is empty).
+    {
         let scoping = SemanticBuilder::new()
             .build(program)
             .semantic
@@ -176,8 +178,12 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
         let mut rewriter = RefRewriter {
             symbol_map,
             replacements: replacements.clone(),
+            import_star_used: false,
         };
         traverse_mut(&mut rewriter, allocator, program, scoping, ());
+        if rewriter.import_star_used {
+            needs.import_star = true;
+        }
     }
 
     // 3. Rewrite statements: imports → require, exports → exports.x.
@@ -326,9 +332,27 @@ fn build_symbol_map<'a>(
 struct RefRewriter {
     symbol_map: HashMap<SymbolId, Replacement>,
     replacements: HashMap<String, Replacement>,
+    /// Set when a dynamic `import()` was rewritten (→ the `__importStar` helper
+    /// is needed).
+    import_star_used: bool,
 }
 
 impl<'a> Traverse<'a, ()> for RefRewriter {
+    // Dynamic `import(x)` → `Promise.resolve().then(() => __importStar(require(x)))`,
+    // matching tsc's `module: commonjs` + `esModuleInterop` emit (import
+    // attributes are dropped, as tsc does). Done on *exit* so the traverser has
+    // already walked the original children and won't descend into the
+    // synthesized arrow (whose scope isn't registered → would panic).
+    fn exit_expression(&mut self, expr: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
+        if let Expression::ImportExpression(imp) = expr {
+            let ast = ctx.ast;
+            let span = imp.span;
+            let source = std::mem::replace(&mut imp.source, ast.expression_null_literal(span));
+            *expr = dynamic_require(source, span, ast);
+            self.import_star_used = true;
+        }
+    }
+
     fn enter_expression(&mut self, expr: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
         // Wrap import-binding calls as `(0, ns.member)(...)` to drop `this`.
         if let Expression::CallExpression(call_expr) = expr
@@ -647,6 +671,42 @@ fn require_call_at<'a>(source: &str, span: oxc_span::Span, ast: AstBuilder<'a>) 
     let arg = ast.expression_string_literal(span, ast.allocator.alloc_str(source), None);
     let callee = ast.expression_identifier(span, "require");
     ast.expression_call(span, callee, NONE, ast.vec1(Argument::from(arg)), false)
+}
+
+/// Dynamic import downlevel: `import(<source>)` →
+/// `Promise.resolve().then(() => __importStar(require(<source>)))`, matching tsc's
+/// `module: commonjs` + `esModuleInterop` emit. The source expression is kept
+/// verbatim (string literal or computed).
+fn dynamic_require<'a>(
+    source: Expression<'a>,
+    span: oxc_span::Span,
+    ast: AstBuilder<'a>,
+) -> Expression<'a> {
+    // require(<source>)
+    let require_call = ast.expression_call(
+        span,
+        ident("require", ast),
+        NONE,
+        ast.vec1(Argument::from(source)),
+        false,
+    );
+    // () => __importStar(require(<source>))
+    let factory = arrow_getter(
+        call(ident("__importStar", ast), vec![require_call], ast),
+        ast,
+    );
+    // Promise.resolve()
+    let promise_resolve = call(member("Promise", "resolve", ast), vec![], ast);
+    // Promise.resolve().then(() => …)
+    let then: Expression<'a> = ast
+        .member_expression_static(
+            span,
+            promise_resolve,
+            ast.identifier_name(span, "then"),
+            false,
+        )
+        .into();
+    call(then, vec![factory], ast)
 }
 
 /// `(0, expr)` sequence — strips `this` from a method-style callee.

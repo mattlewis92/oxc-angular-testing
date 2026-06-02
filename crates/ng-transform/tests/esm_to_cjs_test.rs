@@ -16,6 +16,42 @@ fn cjs(src: &str) -> String {
 }
 
 #[test]
+fn dynamic_import_downlevels_to_promise_require_importstar() {
+    // `import('./m')` → `Promise.resolve().then(() => __importStar(require('./m')))`,
+    // matching tsc `module: commonjs` + `esModuleInterop`.
+    let code = cjs("export async function load() {\n  return import('./m');\n}\n");
+    assert!(
+        code.contains(r#"Promise.resolve().then(() => __importStar(require("./m")))"#),
+        "{code}"
+    );
+    // The `__importStar` helper must be emitted in the prelude.
+    assert!(code.contains("var __importStar"), "{code}");
+}
+
+#[test]
+fn dynamic_import_works_without_static_imports() {
+    // A dynamic import with no static import/export still triggers the rewrite
+    // (and the helper) — the rewriter must run unconditionally.
+    let code = cjs("const m = import('./m');\n");
+    assert!(
+        code.contains(r#"Promise.resolve().then(() => __importStar(require("./m")))"#),
+        "{code}"
+    );
+    assert!(code.contains("var __importStar"), "{code}");
+}
+
+#[test]
+fn dynamic_import_keeps_computed_specifier() {
+    // A non-literal specifier is passed through verbatim: `import(p)` → `require(p)`.
+    let code = cjs("export const f = (p) => import(p);\n");
+    assert!(code.contains("require(p)"), "{code}");
+    assert!(
+        !code.contains("require(\"p\")"),
+        "must not stringify: {code}"
+    );
+}
+
+#[test]
 fn header_use_strict_and_esmodule_marker() {
     let code = cjs("export const a = 1;");
     assert!(code.starts_with("\"use strict\";"), "{code}");
