@@ -103,3 +103,49 @@ fn prelude_does_not_shift_mapped_lines() {
         "`const x = 1` must map to original line 1 despite the prelude\n{code}"
     );
 }
+
+#[test]
+fn dynamic_import_maps_to_the_original_import_line() {
+    // 0: export async function load() {
+    // 1:   return import('./dep');
+    // 2: }
+    let src = "export async function load() {\n  return import('./dep');\n}\n";
+    let Decoded { code, map } = cjs_with_map(src);
+    // The whole `Promise.resolve().then(() => __importStar(require("./dep")))`
+    // wrapper carries the original `import()` span, so it maps back to line 1.
+    let line = gen_line(&code, r#"require("./dep")"#);
+    assert_eq!(
+        orig_line_of(&map, line),
+        Some(1),
+        "dynamic import should map to the original import on line 1\n{code}"
+    );
+}
+
+#[test]
+fn hoisted_jest_mock_maps_to_its_original_line() {
+    // 0: import { foo } from './foo';
+    // 1: const x = 1;
+    // 2: jest.mock('./foo');
+    // 3: foo();
+    let src = "import { foo } from './foo';\nconst x = 1;\njest.mock('./foo');\nfoo();\n";
+    let opts = TransformOptions {
+        module: ModuleKind::CommonJs,
+        target: "es2022".to_string(),
+        jit_transforms: false,
+        hoist_jest_mock: true,
+        source_map: true,
+        ..TransformOptions::default()
+    };
+    let out = transform(src, "m.ts", &opts);
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    let map = SourceMap::from_json_string(&out.source_map.expect("source map")).unwrap();
+    // The mock moved up to the top of the body, but still maps to its original
+    // line 2 (hoisting reorders statements without rewriting their spans).
+    let line = gen_line(&out.code, "jest.mock");
+    assert_eq!(
+        orig_line_of(&map, line),
+        Some(2),
+        "hoisted jest.mock should still map to its original line 2\n{}",
+        out.code
+    );
+}

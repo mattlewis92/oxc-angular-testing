@@ -682,21 +682,25 @@ fn dynamic_require<'a>(
     span: oxc_span::Span,
     ast: AstBuilder<'a>,
 ) -> Expression<'a> {
+    // All wrapper nodes carry the original `import()` span, so the whole
+    // expression maps back to the source location rather than position 0.
+    let call_at = |callee: Expression<'a>, arg: Option<Expression<'a>>| {
+        let args = match arg {
+            Some(a) => ast.vec1(Argument::from(a)),
+            None => ast.vec(),
+        };
+        ast.expression_call(span, callee, NONE, args, false)
+    };
     // require(<source>)
-    let require_call = ast.expression_call(
-        span,
-        ident("require", ast),
-        NONE,
-        ast.vec1(Argument::from(source)),
-        false,
-    );
+    let require_call = call_at(ast.expression_identifier(span, "require"), Some(source));
     // () => __importStar(require(<source>))
-    let factory = arrow_getter(
-        call(ident("__importStar", ast), vec![require_call], ast),
-        ast,
+    let import_star = call_at(
+        ast.expression_identifier(span, "__importStar"),
+        Some(require_call),
     );
+    let factory = arrow_getter(import_star, ast);
     // Promise.resolve()
-    let promise_resolve = call(member("Promise", "resolve", ast), vec![], ast);
+    let promise_resolve = call_at(member_at("Promise", "resolve", span, ast), None);
     // Promise.resolve().then(() => …)
     let then: Expression<'a> = ast
         .member_expression_static(
@@ -706,7 +710,7 @@ fn dynamic_require<'a>(
             false,
         )
         .into();
-    call(then, vec![factory], ast)
+    call_at(then, Some(factory))
 }
 
 /// `(0, expr)` sequence — strips `this` from a method-style callee.
