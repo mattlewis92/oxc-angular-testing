@@ -8,7 +8,7 @@ import { createTransformer } from '../../dist/index.js';
 // and the cache key must depend on `instrument` (otherwise a previously-cached
 // non-instrumented result would be served when coverage is requested).
 describe('@oxc-angular-testing/jest — coverage instrumentation', () => {
-  const transformer = createTransformer({ importMode: 'require', esm: false });
+  const transformer = createTransformer({ module: 'commonjs' });
   const src = [
     'export function classify(n: number) {',
     '  if (n > 0) {',

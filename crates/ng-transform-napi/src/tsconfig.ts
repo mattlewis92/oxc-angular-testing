@@ -8,8 +8,7 @@ import type * as TS from 'typescript';
 
 export interface DerivedTransformOptions {
   target?: string;
-  esm?: boolean;
-  importMode?: 'require' | 'import';
+  module?: 'commonjs' | 'esm';
   experimentalDecorators?: boolean;
   emitDecoratorMetadata?: boolean;
   useDefineForClassFields?: boolean;
@@ -37,7 +36,7 @@ export function scriptTargetToString(target: number): string {
 }
 
 /**
- * Derive transform options (target, module → import mode, decorator flags,
+ * Derive transform options (target, module format, decorator flags,
  * `useDefineForClassFields`) from a project tsconfig. Requires `typescript` to
  * be resolvable; returns `{}` otherwise.
  */
@@ -64,10 +63,14 @@ export function deriveTransformOptions(
   );
   const co = parsed.options || {};
 
-  // module: CommonJS ⇒ require/CJS; anything else (ES2015+, Node16, NodeNext,
-  // ESNext, Preserve) ⇒ ESM imports.
-  const esm =
-    co.module === undefined ? undefined : co.module !== ts.ModuleKind.CommonJS;
+  // module: CommonJS ⇒ commonjs; anything else (ES2015+, Node16, NodeNext,
+  // ESNext, Preserve) ⇒ esm.
+  const moduleKind: 'commonjs' | 'esm' | undefined =
+    co.module === undefined
+      ? undefined
+      : co.module === ts.ModuleKind.CommonJS
+        ? 'commonjs'
+        : 'esm';
 
   // useDefineForClassFields default mirrors TS: true when target >= ES2022.
   let useDefine = co.useDefineForClassFields;
@@ -78,10 +81,7 @@ export function deriveTransformOptions(
 
   const options: DerivedTransformOptions = {};
   if (co.target !== undefined) options.target = scriptTargetToString(co.target);
-  if (esm !== undefined) {
-    options.esm = esm;
-    options.importMode = esm ? 'import' : 'require';
-  }
+  if (moduleKind !== undefined) options.module = moduleKind;
   if (co.experimentalDecorators !== undefined) {
     options.experimentalDecorators = co.experimentalDecorators;
   }

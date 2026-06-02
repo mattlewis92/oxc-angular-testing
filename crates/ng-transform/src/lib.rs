@@ -15,7 +15,7 @@ mod jit_transform;
 mod options;
 mod resources;
 
-pub use options::{ImportMode, TransformOptions};
+pub use options::{ModuleKind, TransformOptions};
 
 use std::path::Path;
 
@@ -71,7 +71,7 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             .build(&program)
             .semantic
             .into_scoping();
-        let mut resources = ResourceTransform::new(options.use_import());
+        let mut resources = ResourceTransform::new(options.is_esm());
         traverse_mut(&mut resources, &allocator, &mut program, scoping, ());
     }
     if options.jit_transforms {
@@ -93,7 +93,7 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             .into_scoping();
         // ESM emits import/export; for CJS we keep the modules untouched here and
         // do the ESM→CJS rewrite (incl. `"use strict"`) ourselves below.
-        let module = if options.use_import() {
+        let module = if options.is_esm() {
             Module::Esm
         } else {
             Module::Preserve
@@ -131,7 +131,7 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
 
         // CJS mode: rewrite ESM import/export to CommonJS, matching TypeScript's
         // `esModuleInterop` emit. Returns the interop helper prelude text.
-        if !options.use_import() {
+        if !options.is_esm() {
             cjs_prelude = esm_to_cjs::esm_to_cjs(&allocator, &mut program);
             did_cjs = true;
         }
@@ -247,8 +247,7 @@ mod tests {
         // ahead of the generated code, so the map must gain that many empty
         // leading lines — otherwise every position is reported too high.
         let opts = TransformOptions {
-            import_mode: ImportMode::Require,
-            esm: false,
+            module: ModuleKind::CommonJs,
             target: "es2022".to_string(),
             jit_transforms: false,
             source_map: true,

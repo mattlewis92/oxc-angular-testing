@@ -9,15 +9,12 @@ export declare function transform(source: string, filename: string, options?: Tr
  */
 export interface TransformOptions {
   /**
-   * `"auto"` (default), `"require"`, or `"import"`. Controls how `templateUrl`
-   * is replaced. Unknown values fall back to `"auto"`.
+   * Output module format: `"commonjs"` (default) or `"esm"`. Drives both the
+   * `templateUrl` replacement (`require` vs top-level `import`) and the
+   * ESM→CommonJS rewrite. Unknown values fall back to `"commonjs"`. Derive it
+   * from tsconfig `module`.
    */
-  importMode?: string
-  /**
-   * Whether the resolved module kind is ESM (used when `importMode` is
-   * `"auto"`). Derived by the caller from tsconfig `module`.
-   */
-  esm?: boolean
+  module?: string
   /** tsconfig `experimentalDecorators`. */
   experimentalDecorators?: boolean
   /** tsconfig `emitDecoratorMetadata`. */

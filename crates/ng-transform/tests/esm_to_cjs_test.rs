@@ -1,12 +1,11 @@
 //! ESM → CommonJS transform, matching TypeScript's `module: commonjs` +
 //! `esModuleInterop: true` emit (verified against `tsc`).
 
-use ng_transform::{ImportMode, TransformOptions, transform};
+use ng_transform::{ModuleKind, TransformOptions, transform};
 
 fn cjs(src: &str) -> String {
     let opts = TransformOptions {
-        import_mode: ImportMode::Require,
-        esm: false,
+        module: ModuleKind::CommonJs,
         target: "es2022".to_string(),
         jit_transforms: false,
         ..TransformOptions::default()

@@ -1,11 +1,11 @@
 //! Ported jest-preset-angular `replaceResources` cases.
 
-use ng_transform::{ImportMode, TransformOptions, transform};
+use ng_transform::{ModuleKind, TransformOptions, transform};
 
-fn run(source: &str, import_mode: ImportMode) -> String {
+fn run(source: &str, module: ModuleKind) -> String {
     // Disable TS/decorator lowering so we snapshot the resource pass in isolation.
     let opts = TransformOptions {
-        import_mode,
+        module,
         lower: false,
         ..TransformOptions::default()
     };
@@ -28,7 +28,7 @@ export class FooComponent {}
 
 #[test]
 fn require_mode_inlines_template_and_strips_styles() {
-    let code = run(COMPONENT, ImportMode::Require);
+    let code = run(COMPONENT, ModuleKind::CommonJs);
     assert!(
         code.contains("template: require(\"./foo.component.html\")"),
         "{code}"
@@ -44,8 +44,8 @@ fn require_mode_inlines_template_and_strips_styles() {
 }
 
 #[test]
-fn import_mode_hoists_top_level_import() {
-    let code = run(COMPONENT, ImportMode::Import);
+fn esm_module_hoists_top_level_import() {
+    let code = run(COMPONENT, ModuleKind::Esm);
     assert!(
         code.contains("import __NG_CLI_RESOURCE__0 from \"./foo.component.html\""),
         "{code}"
@@ -61,7 +61,7 @@ fn normalizes_relative_path_without_dot_prefix() {
 @Component({ templateUrl: 'foo.html' })
 export class FooComponent {}
 "#;
-    let code = run(src, ImportMode::Require);
+    let code = run(src, ModuleKind::CommonJs);
     assert!(code.contains("require(\"./foo.html\")"), "{code}");
 }
 
@@ -71,7 +71,7 @@ fn ignores_components_not_from_angular_core() {
 @Component({ templateUrl: './foo.html' })
 export class FooComponent {}
 "#;
-    let code = run(src, ImportMode::Require);
+    let code = run(src, ModuleKind::CommonJs);
     // No @angular/core import → leave untouched.
     assert!(code.contains("templateUrl: \"./foo.html\""), "{code}");
 }
@@ -82,7 +82,7 @@ fn handles_aliased_component_import() {
 @NgComponent({ templateUrl: './foo.html' })
 export class FooComponent {}
 "#;
-    let code = run(src, ImportMode::Require);
+    let code = run(src, ModuleKind::CommonJs);
     assert!(code.contains("template: require(\"./foo.html\")"), "{code}");
 }
 
@@ -92,7 +92,7 @@ fn handles_single_style_url() {
 @Component({ templateUrl: './foo.html', styleUrl: './foo.css' })
 export class FooComponent {}
 "#;
-    let code = run(src, ImportMode::Require);
+    let code = run(src, ModuleKind::CommonJs);
     assert!(!code.contains("styleUrl"), "{code}");
     assert!(code.contains("template: require(\"./foo.html\")"), "{code}");
 }

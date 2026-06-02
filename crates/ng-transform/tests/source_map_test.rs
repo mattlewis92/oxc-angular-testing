@@ -4,7 +4,7 @@
 //! tests decode the emitted map and assert real generated tokens resolve back
 //! to their original line.
 
-use ng_transform::{ImportMode, TransformOptions, transform};
+use ng_transform::{ModuleKind, TransformOptions, transform};
 use oxc_sourcemap::SourceMap;
 
 struct Decoded {
@@ -14,8 +14,7 @@ struct Decoded {
 
 fn cjs_with_map(src: &str) -> Decoded {
     let opts = TransformOptions {
-        import_mode: ImportMode::Require,
-        esm: false,
+        module: ModuleKind::CommonJs,
         target: "es2022".to_string(),
         jit_transforms: false,
         source_map: true,

@@ -1,30 +1,27 @@
 //! Transform options, including the bits we read from the project tsconfig.
 
-/// How a component `templateUrl` is replaced.
+/// The module format of the emitted code.
 ///
-/// `jest-preset-angular` emits `require(...)` under CommonJS and a top-level
-/// `import` under ESM; [`ImportMode::Auto`] reproduces that from the tsconfig
-/// `module` setting. The jest plugin defaults to `Auto`, the vitest plugin to
-/// [`ImportMode::Import`].
+/// This single setting drives everything that depends on the output format:
+/// component `templateUrl` is replaced with `require('./x.html')` under
+/// [`ModuleKind::CommonJs`] and a hoisted top-level `import` under
+/// [`ModuleKind::Esm`], and the ESM→CommonJS rewrite runs only for `CommonJs`.
+/// Derive it from the tsconfig `module` (CommonJS ⇒ `CommonJs`, anything else ⇒
+/// `Esm`); the jest plugin does this, and the vitest plugin always uses `Esm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ImportMode {
-    /// Derive from the module kind: CommonJS ⇒ `require`, ESM ⇒ `import`.
+pub enum ModuleKind {
+    /// `require(...)` / `module.exports`, matching `tsc` `module: "commonjs"`.
     #[default]
-    Auto,
-    /// Always emit `template: require('./x.html')`.
-    Require,
-    /// Always emit a hoisted top-level `import __NG_CLI_RESOURCE__N from './x.html'`.
-    Import,
+    CommonJs,
+    /// Top-level `import` / `export`.
+    Esm,
 }
 
 /// Options controlling the Angular transforms and optional coverage pass.
 #[derive(Debug, Clone)]
 pub struct TransformOptions {
-    /// How `templateUrl` is replaced. See [`ImportMode`].
-    pub import_mode: ImportMode,
-    /// Whether the resolved module kind is ESM (used when `import_mode` is
-    /// [`ImportMode::Auto`]). Derived from tsconfig `module`.
-    pub esm: bool,
+    /// Output module format. See [`ModuleKind`].
+    pub module: ModuleKind,
     /// tsconfig `experimentalDecorators` — enables legacy decorator lowering.
     pub experimental_decorators: bool,
     /// tsconfig `emitDecoratorMetadata`.
@@ -59,8 +56,7 @@ pub struct TransformOptions {
 impl Default for TransformOptions {
     fn default() -> Self {
         Self {
-            import_mode: ImportMode::Auto,
-            esm: false,
+            module: ModuleKind::CommonJs,
             experimental_decorators: true,
             emit_decorator_metadata: false,
             use_define_for_class_fields: false,
@@ -75,13 +71,10 @@ impl Default for TransformOptions {
 }
 
 impl TransformOptions {
-    /// Resolve [`ImportMode::Auto`] against the module kind: ESM ⇒ import.
+    /// Whether the output is ESM (top-level `import` for `templateUrl`, no
+    /// ESM→CommonJS rewrite). The inverse selects the CommonJS path.
     #[must_use]
-    pub fn use_import(&self) -> bool {
-        match self.import_mode {
-            ImportMode::Auto => self.esm,
-            ImportMode::Require => false,
-            ImportMode::Import => true,
-        }
+    pub fn is_esm(&self) -> bool {
+        matches!(self.module, ModuleKind::Esm)
     }
 }

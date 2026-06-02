@@ -68,7 +68,7 @@ export default { ...createEsmPreset({ tsconfig: './tsconfig.spec.json' }) };
 
 The presets set `transform`, `transformIgnorePatterns` and `moduleFileExtensions`
 for you. You can also wire the transformer manually (`'^.+\\.(ts|js)$':
-['@oxc-angular-testing/jest', { importMode: 'require' }]`).
+['@oxc-angular-testing/jest', { module: 'commonjs' }]`).
 
 ### ESM-only dependencies
 
@@ -95,8 +95,7 @@ instead of being ignored.
 import { transform } from '@oxc-angular-testing/transform';
 
 const { code, map, coverageMap, errors } = transform(source, 'foo.component.ts', {
-  importMode: 'auto', // 'auto' | 'require' | 'import'
-  esm: false,
+  module: 'commonjs', // 'commonjs' | 'esm' — drives templateUrl require/import + ESM→CJS
   coverage: false,
 });
 ```
@@ -108,7 +107,7 @@ decorator/class helpers the lowering emits.
 
 | Transform | Status |
 | --- | --- |
-| `templateUrl` → `template` (`require`/`import` per `importMode`) | ✅ `resources.rs` |
+| `templateUrl` → `template` (`require`/`import` per `module`) | ✅ `resources.rs` |
 | `styleUrls` / `styleUrl` / `styles` / `moduleId` stripping | ✅ `resources.rs` |
 | Constructor/decorator downleveling (`ctorParameters`/`propDecorators`) | ✅ `jit_transform.rs` |
 | Signal initializer-API decorators (`input()`/`output()`/`model()`/queries) | ✅ `jit_transform.rs` |

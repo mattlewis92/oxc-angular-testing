@@ -4,10 +4,12 @@ import { deriveTransformOptions } from '@oxc-angular-testing/transform/tsconfig'
 import { version as transformVersion } from '@oxc-angular-testing/transform/package.json';
 
 export interface OxcAngularJestOptions {
-  /** `"auto"` (default), `"require"`, or `"import"`. */
-  importMode?: 'auto' | 'require' | 'import';
-  /** Whether the project's module kind is ESM (used when importMode is auto). */
-  esm?: boolean;
+  /**
+   * Output module format: `"commonjs"` (default) or `"esm"`. Drives `templateUrl`
+   * (`require` vs top-level `import`) and the ESM→CommonJS rewrite. Derived from
+   * the tsconfig `module` when a `tsconfig` is given; the CJS/ESM presets set it.
+   */
+  module?: 'commonjs' | 'esm';
   /** Always instrument for coverage (jest also enables this when collecting coverage). */
   coverage?: boolean;
   /** Path to a tsconfig to derive target / module / decorator flags from. */
@@ -22,7 +24,7 @@ export interface OxcAngularJestOptions {
    */
   stringifyContentPathRegex?: string | null;
   /** Override individual transform options forwarded to the Rust transform. */
-  transform?: Partial<TransformOptions>;
+  transform?: Partial<Omit<TransformOptions, 'module'>>;
 }
 
 /** Minimal structural shape of a synchronous jest transformer. */
@@ -67,14 +69,13 @@ export function isEsmDependency(
  * Jest transformer factory. Wire up in jest config (or use `createCjsPreset` /
  * `createEsmPreset` from `@oxc-angular-testing/jest/presets`):
  *
- *   transform: { '^.+\\.(ts|js|mjs)$': ['@oxc-angular-testing/jest', { importMode: 'require' }] }
+ *   transform: { '^.+\\.(ts|js|mjs)$': ['@oxc-angular-testing/jest', { module: 'commonjs' }] }
  *
- * Works under both classic CommonJS jest (`importMode: 'require'`; the default
- * `'auto'` resolves to require for CJS) and native-ESM jest (`importMode:
- * 'import'` + Node vm modules). CommonJS output matches TypeScript's
- * `module: "commonjs"` + `esModuleInterop` emit. ESM-only dependencies
- * (`.mjs` / `node_modules`) are downleveled to the runner's module format with
- * the Angular passes skipped.
+ * Works under both classic CommonJS jest (`module: 'commonjs'`, the default) and
+ * native-ESM jest (`module: 'esm'` + Node vm modules). CommonJS output matches
+ * TypeScript's `module: "commonjs"` + `esModuleInterop` emit. ESM-only
+ * dependencies (`.mjs` / `node_modules`) are downleveled to the runner's module
+ * format with the Angular passes skipped.
  */
 export function createTransformer(
   transformerOptions: OxcAngularJestOptions = {},
@@ -82,11 +83,9 @@ export function createTransformer(
   const derived = transformerOptions.tsconfig
     ? deriveTransformOptions(transformerOptions.tsconfig)
     : {};
-  const importMode = transformerOptions.importMode || derived.importMode || 'auto';
-  const esm = transformerOptions.esm ?? derived.esm ?? false;
-  // Resolve whether output modules are ESM (controls the stringified module form).
-  const esmOutput =
-    importMode === 'import' ? true : importMode === 'require' ? false : esm;
+  const moduleKind = transformerOptions.module ?? derived.module ?? 'commonjs';
+  // ESM output controls the stringified content module form (export vs module.exports).
+  const esmOutput = moduleKind === 'esm';
   // `null`/`''` disables stringification.
   const stringifyPattern =
     transformerOptions.stringifyContentPathRegex === undefined
@@ -128,13 +127,12 @@ export function createTransformer(
       const isDep = isEsmDependency(sourcePath, transformerOptions.processEsmModules);
       const opts: TransformOptions = {
         ...derived,
-        importMode,
-        esm,
+        ...transformerOptions.transform,
+        module: moduleKind,
         coverage: collectCoverage || Boolean(transformerOptions.coverage),
         // ESM deps are plain JS: only downlevel the module format, skip the
         // Angular JIT passes (they'd be no-ops but cost a traversal).
         ...(isDep ? { jitTransforms: false } : {}),
-        ...transformerOptions.transform,
       };
       const out = transform(sourceText, sourcePath, opts);
       if (out.errors && out.errors.length > 0) {

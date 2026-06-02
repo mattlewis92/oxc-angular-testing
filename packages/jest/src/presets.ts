@@ -24,7 +24,7 @@ export interface JestPresetConfig {
 export function createCjsPreset(
   transformerOptions: OxcAngularJestOptions = {},
 ): JestPresetConfig {
-  const opts = { importMode: 'require', esm: false, ...transformerOptions };
+  const opts = { module: 'commonjs', ...transformerOptions };
   return {
     moduleFileExtensions: ['ts', 'tsx', 'js', 'mjs', 'html', 'svg', 'json'],
     transform: {
@@ -45,7 +45,7 @@ export function createCjsPreset(
 export function createEsmPreset(
   transformerOptions: OxcAngularJestOptions = {},
 ): JestPresetConfig {
-  const opts = { importMode: 'import', esm: true, ...transformerOptions };
+  const opts = { module: 'esm', ...transformerOptions };
   return {
     moduleFileExtensions: ['ts', 'tsx', 'mjs', 'js', 'html', 'svg', 'json'],
     extensionsToTreatAsEsm: ['.ts', '.tsx', '.html', '.svg'],

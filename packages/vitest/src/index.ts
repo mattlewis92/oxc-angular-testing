@@ -23,10 +23,10 @@ export interface OxcAngularOptions {
   stringifyContentPathRegex?: RegExp;
   /**
    * Override individual transform options forwarded to the Rust transform.
-   * `importMode` / `esm` are intentionally excluded: Vitest always runs native
-   * ESM, so this plugin only ever emits ESM (`import` mode).
+   * `module` is intentionally excluded: Vitest always runs native ESM, so this
+   * plugin only ever emits ESM.
    */
-  transform?: Partial<Omit<TransformOptions, 'importMode' | 'esm'>>;
+  transform?: Partial<Omit<TransformOptions, 'module'>>;
 }
 
 // Vitest augments Vite's resolved config with a `test` field; type the slice we
@@ -80,10 +80,9 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
           ...derived,
           coverage: options.coverage ?? autoCoverage,
           ...options.transform,
-          // Vitest runs native ESM: force `import` mode last so neither the
+          // Vitest runs native ESM: force `esm` last so neither the
           // tsconfig-derived options nor an explicit override can select CJS.
-          importMode: 'import',
-          esm: true,
+          module: 'esm',
         };
         const out = transform(code, id.split('?')[0]!, opts);
         if (out.errors && out.errors.length > 0) {

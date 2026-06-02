@@ -7,8 +7,7 @@ describe('@oxc-angular-testing/transform/tsconfig', () => {
     const tsconfig = fileURLToPath(new URL('./fixtures/tsconfig.fixture.json', import.meta.url));
     const opts = deriveTransformOptions(tsconfig);
     expect(opts.target).toBe('es2015');
-    expect(opts.esm).toBe(false); // module: commonjs
-    expect(opts.importMode).toBe('require');
+    expect(opts.module).toBe('commonjs'); // tsconfig module: commonjs
     expect(opts.experimentalDecorators).toBe(true);
     expect(opts.emitDecoratorMetadata).toBe(true);
     // useDefineForClassFields defaults to false for target < ES2022.

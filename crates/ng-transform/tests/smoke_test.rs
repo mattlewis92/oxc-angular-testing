@@ -6,7 +6,7 @@ use ng_transform::{TransformOptions, transform};
 
 #[test]
 fn plain_transform_returns_code() {
-    // Default options are CJS (esm: false) → `export const` becomes `exports.x`.
+    // Default options are CommonJS → `export const` becomes `exports.x`.
     let out = transform(
         "export const x = 1 + 2;",
         "x.ts",

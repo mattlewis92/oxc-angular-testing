@@ -6,19 +6,18 @@
 #![deny(clippy::all)]
 
 use napi_derive::napi;
-use ng_transform::{ImportMode, TransformOptions as NgOptions, transform as ng_transform};
+use ng_transform::{ModuleKind, TransformOptions as NgOptions, transform as ng_transform};
 
 /// Options forwarded to the Rust transform. All fields are optional; omitted
 /// fields fall back to the Rust-side [`NgOptions`] defaults.
 #[napi(object)]
 #[derive(Default)]
 pub struct TransformOptions {
-    /// `"auto"` (default), `"require"`, or `"import"`. Controls how `templateUrl`
-    /// is replaced. Unknown values fall back to `"auto"`.
-    pub import_mode: Option<String>,
-    /// Whether the resolved module kind is ESM (used when `importMode` is
-    /// `"auto"`). Derived by the caller from tsconfig `module`.
-    pub esm: Option<bool>,
+    /// Output module format: `"commonjs"` (default) or `"esm"`. Drives both the
+    /// `templateUrl` replacement (`require` vs top-level `import`) and the
+    /// ESM→CommonJS rewrite. Unknown values fall back to `"commonjs"`. Derive it
+    /// from tsconfig `module`.
+    pub module: Option<String>,
     /// tsconfig `experimentalDecorators`.
     pub experimental_decorators: Option<bool>,
     /// tsconfig `emitDecoratorMetadata`.
@@ -55,11 +54,10 @@ pub struct TransformOutput {
     pub errors: Vec<String>,
 }
 
-fn parse_import_mode(value: Option<&str>) -> ImportMode {
+fn parse_module(value: Option<&str>) -> ModuleKind {
     match value {
-        Some("require") => ImportMode::Require,
-        Some("import") => ImportMode::Import,
-        _ => ImportMode::Auto,
+        Some("esm") => ModuleKind::Esm,
+        _ => ModuleKind::CommonJs,
     }
 }
 
@@ -69,8 +67,7 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
         return defaults;
     };
     NgOptions {
-        import_mode: parse_import_mode(options.import_mode.as_deref()),
-        esm: options.esm.unwrap_or(defaults.esm),
+        module: parse_module(options.module.as_deref()),
         experimental_decorators: options
             .experimental_decorators
             .unwrap_or(defaults.experimental_decorators),

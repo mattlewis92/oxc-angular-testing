@@ -1,7 +1,7 @@
 //! Verifies TS→JS + decorator lowering produces executable JavaScript with the
 //! template inlined.
 
-use ng_transform::{ImportMode, TransformOptions, transform};
+use ng_transform::{ModuleKind, TransformOptions, transform};
 
 const COMPONENT: &str = r#"import { Component } from '@angular/core';
 
@@ -18,8 +18,7 @@ export class FooComponent {
 #[test]
 fn cjs_lowering_inlines_template_and_strips_types() {
     let opts = TransformOptions {
-        import_mode: ImportMode::Require,
-        esm: false,
+        module: ModuleKind::CommonJs,
         lower: true,
         ..TransformOptions::default()
     };
@@ -39,8 +38,7 @@ fn cjs_lowering_inlines_template_and_strips_types() {
 #[test]
 fn esm_lowering_hoists_import() {
     let opts = TransformOptions {
-        import_mode: ImportMode::Import,
-        esm: true,
+        module: ModuleKind::Esm,
         lower: true,
         ..TransformOptions::default()
     };
@@ -54,8 +52,7 @@ fn esm_lowering_hoists_import() {
 fn target_es2015_downlevels_nullish_coalescing() {
     let opts = TransformOptions {
         target: "es2015".to_string(),
-        esm: true,
-        import_mode: ImportMode::Import,
+        module: ModuleKind::Esm,
         ..TransformOptions::default()
     };
     let out = transform("export const x = a ?? b;", "x.ts", &opts);
@@ -72,8 +69,7 @@ fn target_es2015_downlevels_nullish_coalescing() {
 fn target_esnext_preserves_modern_syntax() {
     let opts = TransformOptions {
         target: "esnext".to_string(),
-        esm: true,
-        import_mode: ImportMode::Import,
+        module: ModuleKind::Esm,
         ..TransformOptions::default()
     };
     let out = transform("export const x = a ?? b;", "x.ts", &opts);
