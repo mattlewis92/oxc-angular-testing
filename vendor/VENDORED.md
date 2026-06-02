@@ -37,7 +37,21 @@ unmodified from crates.io.
    `*.workspace = true`), sibling deps repointed to crates.io, `[lints]`,
    `[[bench]]`, and `[dev-dependencies]` removed (not needed for our use).
 
-No other `src/*.rs` file was modified — additive only.
+### Bug fix (not in `expose-transform.patch`)
+
+4. **`src/transform.rs`** (`exit_statements`) — upstream drops the per-declarator
+   statement counter for an **exported** fn/arrow/class-init declarator
+   (`export const f = () => …`). The counter is hoisted to a sibling before the
+   enclosing `VariableDeclaration`, but the body statement is the wrapping
+   `ExportNamedDeclaration` (span starts at `export`, not `const`), so the
+   offsets never match and `++s[N]` is silently dropped — the declaration is
+   never counted (coverage reports 1/2 instead of 2/2). Fix: when matching a
+   pending insertion, also accept an `ExportNamedDeclaration`'s inner declaration
+   start, so the counter lands before the whole `export` statement (matching
+   istanbul's `cov.s[N]++; export const f = …`). Re-apply on re-sync; consider
+   upstreaming.
+
+No other `src/*.rs` change.
 
 ## Wiring
 

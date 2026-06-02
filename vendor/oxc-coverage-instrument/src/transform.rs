@@ -1528,9 +1528,19 @@ impl<'a> Traverse<'a, CoverageState> for CoverageTransform<'_, 'a> {
                 continue;
             }
             let start = span.start;
+            // An exported declaration (`export const f = () => …`) occupies the
+            // statement slot as an `ExportNamedDeclaration` whose span starts at
+            // `export`, but a per-declarator hoist (see enter_variable_declarator)
+            // targets the inner declaration's start. Match either, so the
+            // statement counter lands before the whole `export` statement —
+            // matching istanbul's `cov.s[N]++; export const f = …`.
+            let inner_start = match stmt {
+                Statement::ExportNamedDeclaration(e) => e.declaration.as_ref().map(|d| d.span().start),
+                _ => None,
+            };
             let mut i = 0;
             while i < pending.len() {
-                if pending[i].target_start == start {
+                if pending[i].target_start == start || Some(pending[i].target_start) == inner_start {
                     let p = pending.swap_remove(i);
                     let counter = build_counter_stmt(CounterKind::from_pending(cov_fn, &p), ctx);
                     insertions.push((idx, counter));

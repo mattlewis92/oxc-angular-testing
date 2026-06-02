@@ -142,3 +142,29 @@ test('branch coverage shape is independent of the ES target (source-level)', () 
   assert.deepEqual(esnext, ['optional-chain', 'optional-chain'], 'two optional-chain branches');
   assert.deepEqual(es2015, esnext, `branch shape must not change with target: ${JSON.stringify({ es2015, esnext })}`);
 });
+
+test('every statement counter is emitted — no dead counters (exported fn-init declarators)', () => {
+  // Regression: `export const f = () => …` is an ExportNamedDeclaration whose
+  // span starts at `export`, but the per-declarator statement counter is hoisted
+  // to the inner VariableDeclaration's start. If those offsets aren't reconciled
+  // the `++s[0]` is dropped, so the declaration statement is never counted and
+  // coverage under-reports (1/2 instead of 2/2). Assert the map has no statement
+  // id without a matching increment in the emitted code, for the forms that hit
+  // this path (arrow/function/class init, with and without `export`).
+  for (const src of [
+    'export const f = (x) => x * 2;',
+    'export const f = (x) => { return x * 2; };',
+    'export const C = class { m(x) { return x * 2; } };',
+    'const f = (x) => x * 2;\nmodule.exports.f = f;',
+  ]) {
+    const out = transform(src, 'f.ts', { module: 'commonjs', coverage: true, jitTransforms: false });
+    const stmtIds = Object.keys(JSON.parse(out.coverageMap).statementMap);
+    for (const id of stmtIds) {
+      assert.match(
+        out.code,
+        new RegExp(`\\.s\\[${id}\\]`),
+        `statement ${id} has no emitted counter (dead counter → under-counts): ${src}`,
+      );
+    }
+  }
+});
