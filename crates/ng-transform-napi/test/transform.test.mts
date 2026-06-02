@@ -31,3 +31,41 @@ test('coverage instrumentation in a single pass', () => {
   assert.ok(out.coverageMap, 'coverageMap present');
   assert.match(out.coverageMap, /fnMap/);
 });
+
+test('coverage does not count synthesized functions (no phantom constructor)', () => {
+  // A class field with `useDefineForClassFields: false` (Angular default) makes
+  // oxc synthesize a constructor to host the init. Istanbul must not count that
+  // generated function, else coverage differs from a babel/jest-preset setup.
+  const out = transform('export class C { x = 1; m() { return this.x; } }', 'c.ts', {
+    module: 'commonjs',
+    coverage: true,
+    jitTransforms: false,
+  });
+  const fns = Object.values(JSON.parse(out.coverageMap).fnMap).map((f: any) => f.name);
+  assert.deepEqual(fns, ['m'], `only the real method, no synthesized constructor: ${JSON.stringify(fns)}`);
+});
+
+test('async method downleveled at es2016 is counted once at its real location', () => {
+  // Repro: async→generator downleveling wraps `return 42` in a synthetic
+  // generator. The generator must not be counted as an extra function, and the
+  // real `load` function/loc must point at the source (not the synthetic 1:0).
+  const src =
+    'export class Calc {\n  add(a, b) { return a + b; }\n  async load() { return 42; }\n}\n';
+  const out = transform(src, 'calc.ts', {
+    module: 'commonjs',
+    coverage: true,
+    target: 'es2016',
+    jitTransforms: false,
+  });
+  const cov = JSON.parse(out.coverageMap);
+  const fns = Object.values(cov.fnMap) as any[];
+  assert.deepEqual(
+    fns.map((f) => f.name).sort(),
+    ['add', 'load'],
+    `exactly add + load, no synthetic generator: ${JSON.stringify(fns.map((f) => f.name))}`,
+  );
+  assert.ok(
+    fns.every((f) => f.decl.start.line > 1 && f.loc.start.line > 1),
+    `no function attributed to the synthetic line 1: ${JSON.stringify(fns.map((f) => [f.name, f.loc.start.line]))}`,
+  );
+});

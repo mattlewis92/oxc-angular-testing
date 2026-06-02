@@ -27,6 +27,16 @@ unmodified from crates.io.
 3. **`Cargo.toml`** — made self-contained: literal `[package]` fields (was
    `*.workspace = true`), sibling deps repointed to crates.io, `[lints]`,
    `[[bench]]`, and `[dev-dependencies]` removed (not needed for our use).
+4. **`src/transform.rs`** — skip **synthesized** functions/arrows (zero-width
+   span) when building `fnMap`, and fall back to the decl span when a function's
+   body span is zero. We instrument *after* the Angular/TS transforms, which add
+   compiler-generated functions with no source location (the constructor oxc
+   synthesizes for class-field init under `useDefineForClassFields: false`; the
+   `ctorParameters = () => […]` arrow; the dynamic-import `() => …` wrapper). The
+   real istanbul never instruments generated code, so counting these inflated our
+   function coverage vs a babel/jest-preset-angular setup. The function entry is
+   skipped but real-span statements inside the body are still counted. The crate's
+   own tests (all real-span inputs) are unaffected.
 
 No other `src/*.rs` file was modified.
 

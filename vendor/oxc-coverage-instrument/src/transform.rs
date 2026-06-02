@@ -232,11 +232,19 @@ impl<'src, 'arena> CoverageTransform<'src, 'arena> {
     fn add_function(&mut self, name: String, decl_span: Span, body_span: Span) -> usize {
         let id_num = self.fn_map.len();
         let line = self.offset_to_position(decl_span.start).line;
+        // A downlevel transform (e.g. async→generator at an older target) can
+        // reset the body span to zero; fall back to the (real) decl span so the
+        // function `loc` doesn't collapse to 1:0 and mis-highlight line 1.
+        let loc_span = if body_span.start == 0 && body_span.end == 0 {
+            decl_span
+        } else {
+            body_span
+        };
         self.fn_map.push(FnEntry {
             name,
             line,
             decl: self.span_to_location(decl_span),
-            loc: self.span_to_location(body_span),
+            loc: self.span_to_location(loc_span),
         });
         id_num
     }
@@ -978,11 +986,17 @@ impl<'a> Traverse<'a, CoverageState> for CoverageTransform<'_, 'a> {
                 .is_some_and(|id| self.ignore_class_methods.contains(&id.name.to_string()));
         // Subtree skips cascade into the body (Istanbul semantics for pragmas
         // and ignoreClassMethods).
+        // A synthesized function (zero-width span) — e.g. the constructor oxc
+        // generates to host class-field initializers when
+        // `useDefineForClassFields: false` — has no source location. Istanbul
+        // does not instrument generated code, so skip its function entry/counter
+        // (but still count any real-span statements inside its body).
+        let synthetic = func.span.start == 0 && func.span.end == 0;
         let pragma_skip = has_pragma
             || self.skip_next
             || self.in_ignored_subtree()
             || ignored_named_function_expression;
-        let fn_counter_only_skip = self.skip_fn_counter_only;
+        let fn_counter_only_skip = self.skip_fn_counter_only || synthetic;
         self.skip_next = false;
         self.skip_fn_counter_only = false;
         self.ignored_fn_stack.push(pragma_skip);
@@ -1048,6 +1062,13 @@ impl<'a> Traverse<'a, CoverageState> for CoverageTransform<'_, 'a> {
         self.ignored_fn_stack.push(pragma_skip);
         if pragma_skip {
             self.skip_next = false;
+            self.pending_name = None;
+            return;
+        }
+        // Synthesized arrow (zero-width span) — e.g. the dynamic-import wrapper or
+        // the JIT `ctorParameters = () => […]`. No source location, so don't count
+        // it as a function; real-span statements in its body are still counted.
+        if arrow.span.start == 0 && arrow.span.end == 0 {
             self.pending_name = None;
             return;
         }
