@@ -201,8 +201,12 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         // CJS mode: rewrite ESM import/export to CommonJS, matching TypeScript's
         // `esModuleInterop` emit. Returns the interop helper prelude text.
         if !options.is_esm() {
-            cjs_prelude = esm_to_cjs::esm_to_cjs(&allocator, &mut program);
-            did_cjs = true;
+            let result = esm_to_cjs::esm_to_cjs(&allocator, &mut program);
+            cjs_prelude = result.prelude;
+            // Only an actual ESM→CJS conversion gets the `"use strict";` directive
+            // and `__esModule` marker; an already-CommonJS module is left as-is
+            // (so we never duplicate its `"use strict";` or re-mark it).
+            did_cjs = result.converted;
         }
     }
 
@@ -246,10 +250,14 @@ fn assemble(
     code: String,
 ) -> (String, usize) {
     let mut prefix = String::new();
+    // `"use strict";` only for an actual ESM→CJS conversion (ESM is implicitly
+    // strict; an already-CommonJS module keeps its own directive, if any). The
+    // interop helper prelude is prepended whenever present — including the rare
+    // already-CJS module that only needed a dynamic `import()` rewrite.
     if did_cjs {
         prefix.push_str("\"use strict\";\n");
-        prefix.push_str(cjs_prelude);
     }
+    prefix.push_str(cjs_prelude);
     prefix.push_str(async_helper_prelude);
     if !coverage_preamble.is_empty() {
         prefix.push_str(coverage_preamble);

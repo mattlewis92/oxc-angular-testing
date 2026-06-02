@@ -113,8 +113,35 @@ struct HelperNeeds {
 /// code. Helpers are emitted as text rather than spliced AST so their (foreign)
 /// spans never reach the codegen source-map builder.
 #[must_use]
-pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> String {
+/// Result of the ESM→CJS rewrite.
+pub struct CjsResult {
+    /// Interop helper text the caller prepends after `"use strict";`.
+    pub prelude: String,
+    /// Whether the module had ES module syntax (`import`/`export`) and was
+    /// therefore converted — i.e. the `__esModule` marker was emitted and the
+    /// caller should add the `"use strict";` directive. False for a module that
+    /// is already CommonJS (only `exports.x = …` / `require(…)`, no `import`/
+    /// `export`): we leave it untouched (no marker, no extra directive) so we
+    /// never re-mark a module that already sets its own `exports.__esModule`,
+    /// matching tsc, which only marks genuine external modules.
+    pub converted: bool,
+}
+
+pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> CjsResult {
     let ast = AstBuilder::new(allocator);
+
+    // A module is "already CommonJS" when it has no ESM import/export syntax. Such
+    // a file is not run through interop marking (see `CjsResult::converted`); we
+    // still walk it below to rewrite any dynamic `import()` → `require()`.
+    let has_esm_syntax = program.body.iter().any(|s| {
+        matches!(
+            s,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+        )
+    });
 
     // 1. Assign a module var per source and a replacement per default/named local.
     let mut module_vars: HashMap<String, String> = HashMap::new();
@@ -254,9 +281,13 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
     }
 
     // 4. Header in the AST: `__esModule` marker + `exports.x = void 0;` hoist.
-    //    Interop helpers are returned as a text prelude (see below).
+    //    Interop helpers are returned as a text prelude (see below). The marker is
+    //    only emitted for genuine ES modules — an already-CommonJS file keeps its
+    //    own exports (and its own `exports.__esModule`, if any) intact.
     let mut final_body = ast.vec();
-    final_body.push(es_module_marker(ast));
+    if has_esm_syntax {
+        final_body.push(es_module_marker(ast));
+    }
     if !exported_names.is_empty() {
         final_body.push(void0_hoist(&exported_names, ast));
     }
@@ -276,7 +307,10 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> St
     if needs.export_star {
         prelude.push_str(EXPORT_STAR);
     }
-    prelude
+    CjsResult {
+        prelude,
+        converted: has_esm_syntax,
+    }
 }
 
 /// Sanitize a module source into a TS-style `<base>_<n>` variable name.
@@ -399,9 +433,19 @@ impl RefRewriter {
         let Expression::Identifier(id) = callee else {
             return None;
         };
-        // Resolve by symbol; fall back to name when unresolved (defensive).
-        self.reference_replacement(id.reference_id.get(), ctx)
-            .or_else(|| self.replacements.get(id.name.as_str()).cloned())
+        // If the reference resolves to a binding, that binding is authoritative:
+        // rewrite only when it is our import symbol, never when a parameter/local
+        // of the same name shadows the import (else we'd miscompile the shadow —
+        // a general correctness bug, e.g. `@angular/core`'s `keyValueArraySet`
+        // parameter). Only when the reference is genuinely unresolved (no symbol —
+        // e.g. an identifier synthesized by an earlier pass with no `reference_id`)
+        // do we fall back to matching by name.
+        if let Some(rid) = id.reference_id.get()
+            && let Some(symbol_id) = ctx.scoping().get_reference(rid).symbol_id()
+        {
+            return self.symbol_map.get(&symbol_id).cloned();
+        }
+        self.replacements.get(id.name.as_str()).cloned()
     }
 }
 

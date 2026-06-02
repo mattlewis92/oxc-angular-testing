@@ -237,3 +237,69 @@ fn shadowed_import_name_is_not_rewritten() {
         "outer call rewritten: {code}"
     );
 }
+
+#[test]
+fn param_shadowing_import_called_uses_the_param_not_the_import() {
+    // R6: a CALL to a name that a function PARAMETER shadows must reference the
+    // parameter, not the import — even when the same import is also called freely
+    // elsewhere. (Hits `@angular/core`'s `keyValueArraySet` parameter; rewriting
+    // the shadow to the unguarded import added empty class names → `classList.add('')`.)
+    let code = cjs(concat!(
+        "import { keyValueArraySet } from './dep';\n",
+        "export function useImport(a, b) { keyValueArraySet(a, b, 1); }\n",
+        "export function toMap(keyValueArraySet, value) { keyValueArraySet(value, 0, true); }\n",
+    ));
+    // Free reference → the import.
+    assert!(
+        code.contains("(0, dep_1.keyValueArraySet)(a, b, 1)"),
+        "free import call rewritten: {code}"
+    );
+    // Shadowed-by-param reference → the parameter, untouched.
+    assert!(
+        code.contains("keyValueArraySet(value, 0, true)")
+            && !code.contains("dep_1.keyValueArraySet)(value"),
+        "param call must NOT be rewritten to the import: {code}"
+    );
+}
+
+#[test]
+fn already_commonjs_module_is_not_re_marked() {
+    // R5: a module that is already CommonJS (no `import`/`export` syntax) and sets
+    // its own `exports.__esModule` must NOT get a second, non-writable
+    // `Object.defineProperty(exports, "__esModule", …)` prepended (which would make
+    // the original assignment throw in strict mode), nor a duplicate `"use strict"`.
+    let opts = TransformOptions {
+        module: ModuleKind::CommonJs,
+        target: "es2022".to_string(),
+        jit_transforms: false,
+        ..TransformOptions::default()
+    };
+    let code = transform(
+        "\"use strict\";\nexports.__esModule = true;\nexports.foo = 42;\n",
+        "index.js",
+        &opts,
+    )
+    .code;
+    assert!(
+        !code.contains("Object.defineProperty(exports, \"__esModule\""),
+        "no injected marker for an already-CJS module: {code}"
+    );
+    assert_eq!(
+        code.matches("\"use strict\"").count(),
+        1,
+        "no duplicate use-strict directive: {code}"
+    );
+    // The module's own export assignments are preserved verbatim.
+    assert!(code.contains("exports.__esModule = true"), "{code}");
+    assert!(code.contains("exports.foo = 42"), "{code}");
+}
+
+#[test]
+fn real_esm_module_still_gets_the_marker() {
+    // Guard the other side of the R5 gate: a genuine ES module is still marked.
+    let code = cjs("export const x = 1;\n");
+    assert!(
+        code.contains("Object.defineProperty(exports, \"__esModule\", { value: true })"),
+        "{code}"
+    );
+}
