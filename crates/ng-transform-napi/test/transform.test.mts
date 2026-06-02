@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { transform } from '../index.js';
 
@@ -70,36 +71,36 @@ test('async method downleveled at es2016 is counted once at its real location', 
   );
 });
 
-test('downleveled async inlines the helper and returns the global Promise (R10)', () => {
-  // At es2016 async IS downleveled — but the helper is inlined (not imported from
-  // a separate-realm runtime module), so the result Promise is the module's
-  // global. Under zone.js that's the zone-patched `Promise`, so `instanceof` /
-  // `expect.any(Promise)` hold.
+test('downleveled async uses the runtime helper and returns the global Promise (R10)', () => {
+  // At es2016 async is downleveled to oxc's `asyncToGenerator` runtime helper
+  // (imported from @oxc-project/runtime — a SEPARATE module, not inlined). Its
+  // bare, late-bound `new Promise` resolves to the realm-global `Promise` at call
+  // time, so under zone.js the result is the zone-patched `Promise` and
+  // `instanceof` / `expect.any(Promise)` hold. (The native, non-downleveled path
+  // at esnext cannot be made zone-aware — it uses the V8 %Promise% intrinsic.)
   const out = transform('export async function f() { return 1; }', 'f.ts', {
     module: 'commonjs',
     jitTransforms: false,
     target: 'es2016',
   }).code;
-  assert.match(out, /_asyncToGenerator\(function\*/, 'async downleveled to a generator');
-  assert.doesNotMatch(
+  assert.doesNotMatch(out, /\basync function\b/, 'async downleveled, not left native');
+  assert.match(out, /function\* *\(/, 'downleveled to a generator');
+  assert.match(
     out,
     /require\("@oxc-project\/runtime\/helpers\/asyncToGenerator"\)/,
-    'helper inlined, not imported from a separate realm',
+    'helper imported from @oxc-project/runtime',
   );
-  assert.match(out, /var _asyncToGenerator = \(function/, 'inline helper definition present');
 
-  // The result Promise is the module's (here reassigned) global Promise.
+  // The separate-module helper's `new Promise` is late-bound, so it resolves to
+  // the module's (here reassigned) global Promise — proving it is zone-safe.
+  const nodeRequire = createRequire(import.meta.url);
   class ZoneAwarePromise extends Promise {}
   const realPromise = globalThis.Promise;
   (globalThis as { Promise: PromiseConstructor }).Promise =
     ZoneAwarePromise as unknown as PromiseConstructor;
   try {
     const mod: { exports: { f(): unknown } } = { exports: { f: () => undefined } };
-    // The inlined-helper async output needs no `require`; pass a stub.
-    const noRequire = () => {
-      throw new Error('unexpected require');
-    };
-    new Function('exports', 'module', 'require', out)(mod.exports, mod, noRequire);
+    new Function('exports', 'module', 'require', out)(mod.exports, mod, nodeRequire);
     assert.ok(mod.exports.f() instanceof ZoneAwarePromise, 'returns the global (zone-patched) Promise');
   } finally {
     (globalThis as { Promise: PromiseConstructor }).Promise = realPromise;
