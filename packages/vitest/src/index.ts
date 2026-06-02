@@ -1,6 +1,10 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
-import { deriveTransformOptions } from '@oxc-angular-testing/transform/tsconfig';
+import {
+  deriveTransformOptions,
+  type DerivedTransformOptions,
+} from '@oxc-angular-testing/transform/tsconfig';
 import type { Plugin, ResolvedConfig } from 'vite';
 
 const TS_RE = /\.[cm]?tsx?(\?|$)/;
@@ -47,7 +51,11 @@ interface VitestAwareConfig {
  * `istanbul` provider; pass `{ coverage: true | false }` to force it.
  */
 export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
-  const derived = options.tsconfig ? deriveTransformOptions(options.tsconfig) : {};
+  // tsconfig derivation is deferred to `configResolved`, where the project root
+  // is known: a relative or `<rootDir>`-prefixed tsconfig path is resolved
+  // against it. Deriving at plugin-construction time (before the root is known)
+  // would mis-resolve such paths, read nothing, and silently drop `target` etc.
+  let derived: DerivedTransformOptions = {};
   const stringifyRe = options.stringifyContentPathRegex ?? DEFAULT_STRINGIFY_RE;
   let autoCoverage = false;
 
@@ -60,6 +68,14 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
       // Our transform emits istanbul `__coverage__`; only auto-enable for the
       // istanbul provider (v8 uses runtime coverage and needs no instrumentation).
       autoCoverage = cov?.enabled === true && cov.provider === 'istanbul';
+
+      if (options.tsconfig) {
+        const root = config.root;
+        const tsconfigPath = options.tsconfig.startsWith('<rootDir>')
+          ? path.join(root, options.tsconfig.slice('<rootDir>'.length))
+          : options.tsconfig;
+        derived = deriveTransformOptions(tsconfigPath, root);
+      }
     },
 
     // Load component `templateUrl` HTML / inline SVG as a string module.

@@ -7,13 +7,27 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./presets": { "types": "./dist/presets.d.ts", "default": "./dist/presets.js" },
-    "./html-transformer": { "types": "./dist/html-transformer.d.ts", "default": "./dist/html-transformer.js" },
-    "./html-transformer-cjs": { "types": "./dist/html-transformer-cjs.d.ts", "default": "./dist/html-transformer-cjs.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./presets": {
+      "types": "./dist/presets.d.ts",
+      "default": "./dist/presets.js"
+    },
+    "./html-transformer": {
+      "types": "./dist/html-transformer.d.ts",
+      "default": "./dist/html-transformer.js"
+    },
+    "./html-transformer-cjs": {
+      "types": "./dist/html-transformer-cjs.d.ts",
+      "default": "./dist/html-transformer-cjs.js"
+    },
     "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mattlewis92/oxc-angular-testing.git",
@@ -32,14 +46,18 @@
     "@oxc-project/runtime": "^0.134.0",
     "cross-env": "^7.0.3",
     "jest": "^30.0.0",
-    "typescript": "^5.6.0"
+    "jest-environment-jsdom": "^30.4.1",
+    "jest-jasmine2": "^30.4.2",
+    "typescript": "^5.6.0",
+    "zone.js": "0.16.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "tsc -p tsconfig.json",
-    "test": "pnpm run test:cjs && pnpm run test:esm",
+    "test": "pnpm run test:cjs && pnpm run test:esm && pnpm run test:zone",
     "test:cjs": "jest --selectProjects cjs",
-    "test:esm": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --selectProjects esm"
+    "test:esm": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --selectProjects esm",
+    "test:zone": "jest --selectProjects zone"
   }
 }

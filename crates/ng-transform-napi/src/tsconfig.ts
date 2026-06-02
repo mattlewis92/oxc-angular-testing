@@ -60,7 +60,20 @@ export function deriveTransformOptions(
     ? tsconfigPath
     : path.resolve(cwd, tsconfigPath);
   const configFile = ts.readConfigFile(resolved, ts.sys.readFile);
-  if (configFile.error) return {};
+  if (configFile.error) {
+    // A path was provided but could not be read. Returning {} silently would
+    // drop every derived option (target, module, decorator flags) and fall back
+    // to oxc's defaults (esnext, no decorator metadata, …) — a silent
+    // miscompile. Surface it. The most common cause is an unexpanded jest
+    // `<rootDir>` token reaching here (the jest plugin expands it, but a custom
+    // wiring may not).
+    console.warn(
+      `@oxc-angular-testing: could not read tsconfig "${resolved}" — ` +
+        `falling back to defaults (no target/module/decorator options derived). ` +
+        `Pass an absolute or correctly-resolved path.`,
+    );
+    return {};
+  }
   const parsed = ts.parseJsonConfigFileContent(
     configFile.config,
     ts.sys,

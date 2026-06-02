@@ -1,7 +1,31 @@
 import * as crypto from 'node:crypto';
+import * as path from 'node:path';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
-import { deriveTransformOptions } from '@oxc-angular-testing/transform/tsconfig';
+import {
+  deriveTransformOptions,
+  type DerivedTransformOptions,
+} from '@oxc-angular-testing/transform/tsconfig';
 import { version as transformVersion } from '@oxc-angular-testing/transform/package.json';
+
+/**
+ * Expand a leading jest `<rootDir>` token. Jest expands `<rootDir>` in its own
+ * well-known config fields but NOT inside a transformer's option object, so a
+ * `{ tsconfig: '<rootDir>/tsconfig.json' }` (the standard jest pattern) arrives
+ * here unexpanded. We expand it ourselves against the project `rootDir`. Any
+ * path without the token is returned unchanged.
+ */
+function expandRootDir(p: string, rootDir: string | undefined): string {
+  if (rootDir && p.startsWith('<rootDir>')) {
+    return path.join(rootDir, p.slice('<rootDir>'.length));
+  }
+  return p;
+}
+
+/** The per-file `options` jest passes to a transformer (the slice we read). */
+interface JestTransformOptions {
+  instrument?: boolean;
+  config?: { rootDir?: string; cwd?: string };
+}
 
 export interface OxcAngularJestOptions {
   /**
@@ -33,12 +57,12 @@ export interface JestSyncTransformer {
   getCacheKey(
     sourceText: string,
     sourcePath: string,
-    options: { instrument?: boolean },
+    options: JestTransformOptions,
   ): string;
   process(
     sourceText: string,
     sourcePath: string,
-    options?: { instrument?: boolean },
+    options?: JestTransformOptions,
   ): { code: string; map?: unknown };
 }
 
@@ -80,24 +104,42 @@ export function isEsmDependency(
 export function createTransformer(
   transformerOptions: OxcAngularJestOptions = {},
 ): JestSyncTransformer {
-  const derived = transformerOptions.tsconfig
-    ? deriveTransformOptions(transformerOptions.tsconfig)
-    : {};
-  const moduleKind = transformerOptions.module ?? derived.module ?? 'commonjs';
-  // ESM output controls the stringified content module form (export vs module.exports).
-  const esmOutput = moduleKind === 'esm';
-  // `null`/`''` disables stringification.
+  // `null`/`''` disables stringification. (Independent of the tsconfig.)
   const stringifyPattern =
     transformerOptions.stringifyContentPathRegex === undefined
       ? '\\.(html|svg)$'
       : transformerOptions.stringifyContentPathRegex;
   const stringifyRe = stringifyPattern ? new RegExp(stringifyPattern) : null;
 
+  // tsconfig derivation is DEFERRED to first use. The project `rootDir` needed to
+  // expand a `<rootDir>/tsconfig.json` option is only available per-file on
+  // `options.config` — not at factory time. Deriving eagerly here would read the
+  // literal (unexpanded) path, find nothing, and derive NO options — silently
+  // dropping `target` (so oxc defaults to esnext: `async` stays native, etc.),
+  // `module`, and the decorator flags. Resolve lazily and memoize.
+  let resolved:
+    | { derived: DerivedTransformOptions; moduleKind: 'commonjs' | 'esm'; esmOutput: boolean }
+    | undefined;
+  const resolve = (config?: { rootDir?: string; cwd?: string }) => {
+    if (resolved) return resolved;
+    let derived: DerivedTransformOptions = {};
+    if (transformerOptions.tsconfig) {
+      const rootDir = config?.rootDir;
+      const tsconfigPath = expandRootDir(transformerOptions.tsconfig, rootDir);
+      derived = deriveTransformOptions(tsconfigPath, rootDir ?? config?.cwd);
+    }
+    const moduleKind = transformerOptions.module ?? derived.module ?? 'commonjs';
+    // ESM output controls the stringified content module form (export vs module.exports).
+    resolved = { derived, moduleKind, esmOutput: moduleKind === 'esm' };
+    return resolved;
+  };
+
   return {
     canInstrument: true,
     // Include the native transform version so jest's transform cache is
     // invalidated when the binding (and thus its output) changes.
     getCacheKey(sourceText, sourcePath, options) {
+      const { derived } = resolve(options?.config);
       return crypto
         .createHash('sha1')
         .update(transformVersion)
@@ -114,6 +156,7 @@ export function createTransformer(
         .digest('hex');
     },
     process(sourceText, sourcePath, options) {
+      const { derived, moduleKind, esmOutput } = resolve(options?.config);
       // Component templateUrl HTML / inline SVG: return the raw content as a
       // string module rather than compiling it (which would parse `<svg>` etc.
       // as code).
