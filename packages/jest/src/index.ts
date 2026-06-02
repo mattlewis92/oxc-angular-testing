@@ -130,9 +130,11 @@ export function createTransformer(
         ...transformerOptions.transform,
         module: moduleKind,
         coverage: collectCoverage || Boolean(transformerOptions.coverage),
-        // ESM deps are plain JS: only downlevel the module format, skip the
-        // Angular JIT passes (they'd be no-ops but cost a traversal).
-        ...(isDep ? { jitTransforms: false } : {}),
+        // Hoist `jest.mock()` above imports for the user's test code (jest
+        // requires this). Deps are library code with no jest.mock + skip JIT.
+        ...(isDep
+          ? { jitTransforms: false, hoistJestMock: false }
+          : { hoistJestMock: true }),
       };
       const out = transform(sourceText, sourcePath, opts);
       if (out.errors && out.errors.length > 0) {

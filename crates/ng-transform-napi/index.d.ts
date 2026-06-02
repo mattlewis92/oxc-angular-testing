@@ -27,6 +27,11 @@ export interface TransformOptions {
    */
   jitTransforms?: boolean
   /**
+   * Hoist `jest.mock()` / `jest.unmock()` / etc. above imports
+   * (babel-plugin-jest-hoist). Default `false`; the jest plugin enables it.
+   */
+  hoistJestMock?: boolean
+  /**
    * ECMAScript target for syntax downleveling (e.g. `"es2017"`, `"esnext"`).
    * Derive from tsconfig `target`. Default `"esnext"`.
    */

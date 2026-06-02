@@ -11,6 +11,7 @@
 //! codegen.
 
 mod esm_to_cjs;
+mod jest_hoist;
 mod jit_transform;
 mod options;
 mod resources;
@@ -31,6 +32,7 @@ use oxc_transformer::{
 };
 use oxc_traverse::traverse_mut;
 
+use jest_hoist::JestHoist;
 use jit_transform::JitTransform;
 use resources::ResourceTransform;
 
@@ -81,6 +83,17 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             .into_scoping();
         let mut jit = JitTransform::new();
         traverse_mut(&mut jit, &allocator, &mut program, scoping, ());
+    }
+
+    // Hoist `jest.mock()` above imports (babel-plugin-jest-hoist), before the
+    // ESM→CJS rewrite so the hoisted call lands above the generated requires.
+    if options.hoist_jest_mock {
+        let scoping = SemanticBuilder::new()
+            .build(&program)
+            .semantic
+            .into_scoping();
+        let mut hoist = JestHoist::new();
+        traverse_mut(&mut hoist, &allocator, &mut program, scoping, ());
     }
 
     // TypeScript → JavaScript + legacy-decorator lowering, so the output is

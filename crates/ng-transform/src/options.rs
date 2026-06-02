@@ -35,6 +35,10 @@ pub struct TransformOptions {
     /// Run the Angular compiler-cli JIT transforms (downlevel decorators +
     /// signal initializer-API decorators) before lowering.
     pub jit_transforms: bool,
+    /// Hoist `jest.mock()` / `jest.unmock()` / etc. above imports, porting
+    /// `babel-plugin-jest-hoist`. The jest plugin always enables this; vitest
+    /// does its own `vi.mock` hoisting, so it leaves this off.
+    pub hoist_jest_mock: bool,
     /// ECMAScript target for syntax downleveling, e.g. `"es2017"`, `"es2022"`,
     /// `"esnext"` (the default). Maps to oxc's `EnvOptions::from_target` — derive
     /// it from tsconfig `target`. Only syntax newer than the target is lowered;
@@ -61,6 +65,7 @@ impl Default for TransformOptions {
             emit_decorator_metadata: false,
             use_define_for_class_fields: false,
             jit_transforms: true,
+            hoist_jest_mock: false,
             target: "esnext".to_string(),
             lower: true,
             coverage: false,

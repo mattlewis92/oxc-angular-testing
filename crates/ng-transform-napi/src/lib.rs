@@ -27,6 +27,9 @@ pub struct TransformOptions {
     /// Run the Angular JIT transforms (downlevel decorators + signal initializer
     /// APIs). Default `true`.
     pub jit_transforms: Option<bool>,
+    /// Hoist `jest.mock()` / `jest.unmock()` / etc. above imports
+    /// (babel-plugin-jest-hoist). Default `false`; the jest plugin enables it.
+    pub hoist_jest_mock: Option<bool>,
     /// ECMAScript target for syntax downleveling (e.g. `"es2017"`, `"esnext"`).
     /// Derive from tsconfig `target`. Default `"esnext"`.
     pub target: Option<String>,
@@ -78,6 +81,7 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
             .use_define_for_class_fields
             .unwrap_or(defaults.use_define_for_class_fields),
         jit_transforms: options.jit_transforms.unwrap_or(defaults.jit_transforms),
+        hoist_jest_mock: options.hoist_jest_mock.unwrap_or(defaults.hoist_jest_mock),
         target: options.target.unwrap_or(defaults.target),
         lower: options.lower.unwrap_or(defaults.lower),
         coverage: options.coverage.unwrap_or(defaults.coverage),
