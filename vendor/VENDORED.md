@@ -19,26 +19,25 @@ unmodified from crates.io.
 
 ## Local changes (see `expose-transform.patch`)
 
-1. **`src/instrument.rs`** — added one public function `instrument_program(allocator,
-   program, source, filename, options)`: the post-parse half of `instrument()`,
-   operating on a program the caller already parsed/transformed in their arena.
-   It does not parse and does not run the TS-strip pass. No existing code changed.
-2. **`src/lib.rs`** — re-export `instrument_program`.
+1. **`src/instrument.rs`** — added two public functions on top of `instrument()`:
+   - `instrument_program(allocator, program, source, filename, options)`: the
+     post-parse half of `instrument()` (instrument **and** codegen), operating on
+     a program the caller already parsed/transformed in their arena.
+   - `instrument_program_ast(...)` → `InstrumentAstResult { coverage_map_json,
+     preamble }`: instrument **without** codegen — insert the counters into the
+     program and return the coverage map + preamble text. This lets us instrument
+     at *source level* (before the Angular/TS transforms) and codegen once at the
+     end, so the coverage map mirrors the source: independent of the ES `target`
+     (no `?.`/`??`/`async` branch reshaping) and free of compiler-synthesized
+     nodes (the field-init constructor, `ctorParameters` arrows, the
+     dynamic-import wrapper). No existing code changed.
+2. **`src/lib.rs`** — re-export `instrument_program`, `instrument_program_ast`,
+   `InstrumentAstResult`.
 3. **`Cargo.toml`** — made self-contained: literal `[package]` fields (was
    `*.workspace = true`), sibling deps repointed to crates.io, `[lints]`,
    `[[bench]]`, and `[dev-dependencies]` removed (not needed for our use).
-4. **`src/transform.rs`** — skip **synthesized** functions/arrows (zero-width
-   span) when building `fnMap`, and fall back to the decl span when a function's
-   body span is zero. We instrument *after* the Angular/TS transforms, which add
-   compiler-generated functions with no source location (the constructor oxc
-   synthesizes for class-field init under `useDefineForClassFields: false`; the
-   `ctorParameters = () => […]` arrow; the dynamic-import `() => …` wrapper). The
-   real istanbul never instruments generated code, so counting these inflated our
-   function coverage vs a babel/jest-preset-angular setup. The function entry is
-   skipped but real-span statements inside the body are still counted. The crate's
-   own tests (all real-span inputs) are unaffected.
 
-No other `src/*.rs` file was modified.
+No other `src/*.rs` file was modified — additive only.
 
 ## Wiring
 

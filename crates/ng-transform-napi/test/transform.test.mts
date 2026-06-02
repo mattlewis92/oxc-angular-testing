@@ -69,3 +69,21 @@ test('async method downleveled at es2016 is counted once at its real location', 
     `no function attributed to the synthetic line 1: ${JSON.stringify(fns.map((f) => [f.name, f.loc.start.line]))}`,
   );
 });
+
+test('branch coverage shape is independent of the ES target (source-level)', () => {
+  // Instrumenting before downleveling means `?.` is always 2 optional-chain
+  // branches — not 1 cond-expr after an es2015 rewrite. This is what keeps
+  // coverage stable regardless of the project's tsconfig target.
+  const src = 'export function f(a) { return a?.b?.c; }\n';
+  const branchTypes = (target: string) =>
+    Object.values(
+      JSON.parse(
+        transform(src, 'f.ts', { module: 'commonjs', coverage: true, jitTransforms: false, target })
+          .coverageMap,
+      ).branchMap,
+    ).map((b: any) => b.type);
+  const esnext = branchTypes('esnext');
+  const es2015 = branchTypes('es2015');
+  assert.deepEqual(esnext, ['optional-chain', 'optional-chain'], 'two optional-chain branches');
+  assert.deepEqual(es2015, esnext, `branch shape must not change with target: ${JSON.stringify({ es2015, esnext })}`);
+});

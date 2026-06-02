@@ -451,6 +451,75 @@ pub fn instrument_program<'a>(
     })
 }
 
+/// VENDOR PATCH (oxc-angular-testing): instrument the program **without** codegen.
+///
+/// Inserts the coverage counters into `program` and returns the istanbul coverage
+/// map (JSON) plus the preamble source text. The caller runs its own AST
+/// transforms afterwards (TS strip, decorator lowering, ESM→CJS, …) and codegens
+/// once, prepending `preamble`. Instrumenting *before* those transforms is what
+/// makes the coverage map mirror the original source: it is independent of the
+/// `target` (no `?.`/`??`/`async` reshaping) and never sees compiler-synthesized
+/// nodes (the field-init constructor, `ctorParameters` arrows, etc.).
+pub struct InstrumentAstResult {
+    /// Serialized istanbul `FileCoverage` (statementMap / fnMap / branchMap).
+    pub coverage_map_json: String,
+    /// Preamble source (`var <cov> = (function () { … })();`) to emit before the
+    /// instrumented code. Empty when the file is `/* istanbul ignore file */`.
+    pub preamble: String,
+}
+
+/// See [`InstrumentAstResult`]. Mutates `program` in place (inserts counters);
+/// `source` provides the original byte offsets the coverage map references.
+pub fn instrument_program_ast<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    filename: &str,
+    options: &InstrumentOptions,
+) -> Result<InstrumentAstResult, InstrumentError> {
+    if !is_valid_js_identifier(&options.coverage_variable) {
+        return Err(InstrumentError::InvalidCoverageVariable(
+            options.coverage_variable.clone(),
+        ));
+    }
+    let (pragmas, unhandled) = PragmaMap::from_program(program, source);
+    if pragmas.ignore_file {
+        let empty = empty_coverage_result(filename, source, unhandled);
+        return Ok(InstrumentAstResult {
+            coverage_map_json: empty.coverage_map_json,
+            preamble: String::new(),
+        });
+    }
+    let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
+    let cov_fn_name = generate_cov_fn_name(filename);
+    let mut transform = CoverageTransform::new(TransformInit {
+        allocator,
+        source,
+        cov_fn_name: &cov_fn_name,
+        report_logic: options.report_logic,
+        ignore_class_methods: options.ignore_class_methods.clone(),
+    });
+    let state = CoverageState { pragmas };
+    let _scoping = traverse_mut(&mut transform, allocator, program, scoping, state);
+
+    let coverage_map =
+        build_coverage_map(filename, transform, options.input_source_map.as_deref());
+    let coverage_json = serialize_coverage_map(&coverage_map);
+    let coverage_hash = djb31_hex(&coverage_json);
+    let preamble = generate_preamble_source(&PreambleInputs {
+        coverage: &coverage_map,
+        coverage_json: &coverage_json,
+        coverage_hash: &coverage_hash,
+        coverage_var: &options.coverage_variable,
+        cov_fn_name: &cov_fn_name,
+        report_logic: options.report_logic,
+    });
+    Ok(InstrumentAstResult {
+        coverage_map_json: coverage_json,
+        preamble,
+    })
+}
+
 /// Run `oxc_transformer`'s TypeScript-strip pass on the parsed program in
 /// place. Returns the updated `Scoping` produced by the transformer (the
 /// semantic state may change as type-only nodes are removed). Surviving nodes

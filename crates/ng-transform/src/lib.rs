@@ -6,9 +6,16 @@
 //! passes, with optional istanbul-compatible coverage instrumentation folded
 //! into the *same* parse/codegen via the vendored [`oxc_coverage_instrument`].
 //!
-//! Pipeline: parse → semantic → Angular passes → (oxc TS/decorator lowering) →
-//! \[coverage\] → codegen. One [`oxc_allocator::Allocator`], one parse, one
-//! codegen.
+//! Pipeline: parse → semantic → \[coverage instrument\] → Angular passes →
+//! (oxc TS/decorator lowering) → ESM→CJS → codegen. One
+//! [`oxc_allocator::Allocator`], one parse, one codegen.
+//!
+//! Coverage is instrumented **first**, on the original (TS/JSX) AST, so the
+//! istanbul map mirrors the source: it's independent of the ES `target` (no
+//! `?.`/`??`/`async` branch reshaping) and never counts compiler-synthesized
+//! nodes (the field-init constructor, `ctorParameters` arrows, the
+//! dynamic-import wrapper). The inserted counters ride through the transforms;
+//! the preamble is prepended at the single codegen.
 
 mod esm_to_cjs;
 mod jest_hoist;
@@ -22,7 +29,7 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};
-use oxc_coverage_instrument::{InstrumentOptions, instrument_program};
+use oxc_coverage_instrument::{InstrumentOptions, instrument_program_ast};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
@@ -64,6 +71,30 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
     // emit after `"use strict";`.
     let mut did_cjs = false;
     let mut cjs_prelude = String::new();
+
+    // Coverage is instrumented up front, on the original AST, before any
+    // transform reshapes or synthesizes nodes — so the map reflects the source.
+    // The counters ride through the transforms below; `coverage_preamble` (the
+    // `var __coverage__…` IIFE) is prepended at codegen.
+    let mut coverage_map: Option<String> = None;
+    let mut coverage_preamble = String::new();
+    if options.coverage {
+        let cov_opts = InstrumentOptions {
+            coverage_variable: options
+                .coverage_variable
+                .clone()
+                .unwrap_or_else(|| "__coverage__".to_string()),
+            source_map: options.source_map,
+            ..InstrumentOptions::default()
+        };
+        match instrument_program_ast(&allocator, &mut program, source, filename, &cov_opts) {
+            Ok(result) => {
+                coverage_map = Some(result.coverage_map_json);
+                coverage_preamble = result.preamble;
+            }
+            Err(err) => errors.push(err.to_string()),
+        }
+    }
 
     // Angular passes mutate `program` in place on `allocator`:
     //   resources (templateUrl/styles) → JIT (signal initializer APIs + downlevel
@@ -163,31 +194,6 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         }
     }
 
-    if options.coverage {
-        let cov_opts = InstrumentOptions {
-            coverage_variable: options
-                .coverage_variable
-                .clone()
-                .unwrap_or_else(|| "__coverage__".to_string()),
-            source_map: options.source_map,
-            ..InstrumentOptions::default()
-        };
-        match instrument_program(&allocator, &mut program, source, filename, &cov_opts) {
-            Ok(result) => {
-                let (code, prefix_lines) = assemble_cjs(did_cjs, &cjs_prelude, result.code);
-                return TransformResult {
-                    code,
-                    source_map: result
-                        .source_map
-                        .map(|map| offset_source_map(&map, prefix_lines)),
-                    coverage_map: Some(result.coverage_map_json),
-                    errors,
-                };
-            }
-            Err(err) => errors.push(err.to_string()),
-        }
-    }
-
     let codegen_options = CodegenOptions {
         source_map_path: options
             .source_map
@@ -199,30 +205,43 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         .with_source_text(source)
         .build(&program);
 
-    let (code, prefix_lines) = assemble_cjs(did_cjs, &cjs_prelude, ret.code);
+    let (code, prefix_lines) = assemble(did_cjs, &cjs_prelude, &coverage_preamble, ret.code);
     TransformResult {
         code,
         source_map: ret
             .map
             .map(|map| offset_source_map(&map.to_json_string(), prefix_lines)),
-        coverage_map: None,
+        coverage_map,
         errors,
     }
 }
 
-/// In CJS mode, prepend `"use strict";` and the interop helper prelude.
-///
-/// Returns the assembled code and the number of lines prepended ahead of the
-/// generated code, so the source map can be shifted to match (see
-/// [`offset_source_map`]).
-fn assemble_cjs(did_cjs: bool, prelude: &str, code: String) -> (String, usize) {
+/// Prepend, in order: `"use strict";` + the CJS interop prelude (CJS only), then
+/// the coverage preamble (when instrumenting). Returns the assembled code and
+/// the number of prepended lines, so the source map can be shifted to match
+/// (see [`offset_source_map`]).
+fn assemble(
+    did_cjs: bool,
+    cjs_prelude: &str,
+    coverage_preamble: &str,
+    code: String,
+) -> (String, usize) {
+    let mut prefix = String::new();
     if did_cjs {
-        let prefix = format!("\"use strict\";\n{prelude}");
-        let prefix_lines = prefix.bytes().filter(|&b| b == b'\n').count();
-        (format!("{prefix}{code}"), prefix_lines)
-    } else {
-        (code, 0)
+        prefix.push_str("\"use strict\";\n");
+        prefix.push_str(cjs_prelude);
     }
+    if !coverage_preamble.is_empty() {
+        prefix.push_str(coverage_preamble);
+        if !coverage_preamble.ends_with('\n') {
+            prefix.push('\n');
+        }
+    }
+    if prefix.is_empty() {
+        return (code, 0);
+    }
+    let prefix_lines = prefix.bytes().filter(|&b| b == b'\n').count();
+    (format!("{prefix}{code}"), prefix_lines)
 }
 
 /// Shift every mapping in a source map down by `lines` generated lines.
