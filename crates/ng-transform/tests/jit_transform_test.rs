@@ -166,6 +166,43 @@ export class MyComponent {
 }
 
 #[test]
+fn signal_query_preserves_locator_and_options() {
+    // Regression: the query predicate (class ref / string / forwardRef) and any
+    // options must be preserved as decorator args — dropping the locator left
+    // Angular unable to wire the query (`this.query()` threw at runtime).
+    let code = ts(
+        r#"import { Component, contentChild, viewChild } from '@angular/core';
+import { Dir } from './dir';
+@Component({ selector: 'r8', template: '' })
+export class R8 {
+  a = viewChild(Dir);
+  b = viewChild('ref');
+  c = contentChild(Dir);
+  d = viewChild(Dir, { read: Dir });
+}
+"#,
+    );
+    // Class-ref locator preserved (ViewChild + ContentChild).
+    assert!(code.contains("args: [Dir, { isSignal: true }]"), "{code}");
+    // String template-ref locator preserved.
+    assert!(
+        code.contains(r#"args: ["ref", { isSignal: true }]"#),
+        "{code}"
+    );
+    assert!(code.contains("type: ContentChild"), "{code}");
+    // Options are spread before `isSignal` (matches Angular's downlevel).
+    assert!(
+        code.contains("read: Dir") && code.contains("isSignal: true"),
+        "options must be preserved alongside isSignal:\n{code}"
+    );
+    // The locator must never be dropped to a bare `{ isSignal: true }` arg.
+    assert!(
+        !code.contains("args: [{ isSignal: true }]"),
+        "locator was dropped:\n{code}"
+    );
+}
+
+#[test]
 fn ignores_classes_without_angular_decorators() {
     let code = ts(r#"export class Plain {
   constructor(x: number) {}

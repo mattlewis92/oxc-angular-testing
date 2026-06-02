@@ -28,13 +28,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use oxc_allocator::CloneIn;
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, Class, ClassElement, Declaration, Decorator, Expression,
-    FormalParameter, FormalParameterKind, ImportDeclarationSpecifier, ImportOrExportKind,
-    MethodDefinitionKind, ObjectPropertyKind, Program, PropertyDefinitionType, PropertyKey,
-    PropertyKind, Statement, TSType, TSTypeName, WithClause,
+    Argument, ArrayExpressionElement, CallExpression, Class, ClassElement, Declaration, Decorator,
+    Expression, FormalParameter, FormalParameterKind, ImportDeclarationSpecifier,
+    ImportOrExportKind, MethodDefinitionKind, ObjectPropertyKind, Program, PropertyDefinitionType,
+    PropertyKey, PropertyKind, Statement, TSType, TSTypeName, WithClause,
 };
 use oxc_span::SPAN;
 use oxc_traverse::{Traverse, TraverseCtx};
@@ -544,7 +545,7 @@ impl JitTransform {
                 continue;
             };
             let alias = self.extract_alias(call).unwrap_or(name);
-            let decs = self.build_signal_decorators(init, &alias, ast);
+            let decs = self.build_signal_decorators(init, &alias, call, ast);
             if !decs.is_empty() {
                 synthesized.push((idx, decs));
             }
@@ -615,6 +616,7 @@ impl JitTransform {
         &mut self,
         init: Initializer,
         alias: &str,
+        call: &CallExpression<'a>,
         ast: AstBuilder<'a>,
     ) -> Vec<Decorator<'a>> {
         let mut decs = Vec::new();
@@ -630,7 +632,7 @@ impl JitTransform {
                 decs.push(self.output_decorator(alias, ast));
             }
             Initializer::Query(kind) => {
-                decs.push(self.query_decorator(kind, ast));
+                decs.push(self.query_decorator(kind, call, ast));
             }
         }
         decs
@@ -666,15 +668,37 @@ impl JitTransform {
         ast.decorator(SPAN, call)
     }
 
-    fn query_decorator<'a>(&mut self, kind: &'static str, ast: AstBuilder<'a>) -> Decorator<'a> {
+    /// `viewChild(locator, opts?)` → `@ViewChild(locator, { ...opts, isSignal: true })`,
+    /// matching Angular's JIT downlevel: the predicate (first arg) is preserved
+    /// verbatim, and `isSignal: true` is appended to a spread of the original
+    /// options. Dropping the locator left Angular unable to wire the query
+    /// (`this.query()` threw at runtime).
+    fn query_decorator<'a>(
+        &mut self,
+        kind: &'static str,
+        call: &CallExpression<'a>,
+        ast: AstBuilder<'a>,
+    ) -> Decorator<'a> {
         self.use_ng_symbol(kind);
-        // `@Kind({ isSignal: true })` — the locator/options are best-effort; the
-        // important bit for JIT is the `isSignal` marker decorator.
-        let opts = object(vec![prop("isSignal", bool_lit(true, ast), ast)], ast);
+        let alloc = ast.allocator;
+
+        // Options: `{ ...<original options arg>, isSignal: true }`.
+        let mut opts_props = ast.vec();
+        if let Some(opts) = call.arguments.get(1).and_then(Argument::as_expression) {
+            opts_props.push(ast.object_property_kind_spread_property(SPAN, opts.clone_in(alloc)));
+        }
+        opts_props.push(prop("isSignal", bool_lit(true, ast), ast));
+        let opts_obj = ast.expression_object(SPAN, opts_props);
+
         let mut args = ast.vec();
-        args.push(Argument::from(opts));
-        let call = ast.expression_call(SPAN, ident(kind, ast), NONE, args, false);
-        ast.decorator(SPAN, call)
+        // Predicate: the first argument (class ref / string / forwardRef), as-is.
+        if let Some(predicate) = call.arguments.first() {
+            args.push(predicate.clone_in(alloc));
+        }
+        args.push(Argument::from(opts_obj));
+
+        let decorator_call = ast.expression_call(SPAN, ident(kind, ast), NONE, args, false);
+        ast.decorator(SPAN, decorator_call)
     }
 
     /// Process the constructor: strip Angular param decorators, collect
