@@ -141,6 +141,21 @@ lowering, coverage) plus the jest/vitest integration suites.
   rather than compiled, so component `templateUrl` HTML and inline SVG imports
   work. The jest presets route `.html`/`.svg` through this; the vitest plugin's
   `load` hook does the same. Mirrors jest-preset-angular's option of the same name.
+- **Coverage baseline** — instrumentation runs on the **source** (before any
+  transform), so the coverage map is target-independent and matches
+  `istanbul-lib-instrument` byte-for-byte on the same source (enforced by the
+  differential test in `transform/test/coverage-differential.test.mts`). This is a
+  deliberate, more-truthful baseline. `jest-preset-angular` (ts-jest) instead
+  instruments the **compiled CommonJS output**, so its `%` reads slightly *higher*
+  on the same code: it counts two always-covered structural nodes that don't exist
+  in the source — the synthesized field-init **constructor** (a function) and the
+  CJS **export plumbing** (`exports.X = …`, statements). Both are always hit, and
+  since the base fraction is < 100%, including them raises the percentage. Same
+  covered/uncovered *lines*, different denominator. **Migrating from
+  jest-preset-angular:** re-baseline your `coverageThreshold`s against this
+  transform's output — run once with `--coverage` and set the thresholds from the
+  reported numbers (they reflect the real, executable surface), e.g. derive them
+  from `coverage/coverage-summary.json`.
 
 ## Development
 
