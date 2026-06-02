@@ -55,6 +55,37 @@ export class MyDir {
 }
 
 #[test]
+fn type_only_param_types_emit_object_not_dangling_reference() {
+    // Regression: utility types (`Pick`), structural types (`ReadonlyArray`) and
+    // `import type` symbols have no runtime value — emitting them as the param
+    // `type` threw `ReferenceError` during Angular DI. They must become `Object`.
+    let code = ts(r#"import { Inject, Injectable } from '@angular/core';
+import type { Config } from './config';
+@Injectable()
+export class R3Service {
+  constructor(
+    @Inject('CONFIG') private readonly cfg: Pick<Config, 'a'>,
+    @Inject('NAMES') private readonly names: ReadonlyArray<string>,
+  ) {}
+}
+"#);
+    assert!(
+        !code.contains("type: Pick"),
+        "Pick is a type-only utility — must not be a value ref:\n{code}"
+    );
+    assert!(
+        !code.contains("type: ReadonlyArray"),
+        "ReadonlyArray has no runtime value — must not be a value ref:\n{code}"
+    );
+    assert!(
+        !code.contains("type: Config"),
+        "Config is `import type` — must not be a value ref:\n{code}"
+    );
+    // Both params become `type: Object`.
+    assert_eq!(code.matches("type: Object").count(), 2, "{code}");
+}
+
+#[test]
 fn member_decorators_become_prop_decorators() {
     let code = ts(r#"import { Directive, Input, Output } from '@angular/core';
 @Directive()

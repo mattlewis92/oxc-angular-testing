@@ -31,10 +31,10 @@ use std::collections::{HashMap, HashSet};
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, Class, ClassElement, Decorator, Expression, FormalParameter,
-    FormalParameterKind, ImportDeclarationSpecifier, ImportOrExportKind, MethodDefinitionKind,
-    ObjectPropertyKind, Program, PropertyDefinitionType, PropertyKey, PropertyKind, Statement,
-    TSType, TSTypeName, WithClause,
+    Argument, ArrayExpressionElement, Class, ClassElement, Declaration, Decorator, Expression,
+    FormalParameter, FormalParameterKind, ImportDeclarationSpecifier, ImportOrExportKind,
+    MethodDefinitionKind, ObjectPropertyKind, Program, PropertyDefinitionType, PropertyKey,
+    PropertyKind, Statement, TSType, TSTypeName, WithClause,
 };
 use oxc_span::SPAN;
 use oxc_traverse::{Traverse, TraverseCtx};
@@ -58,6 +58,13 @@ pub struct JitTransform {
     ng_namespace: Option<String>,
     /// canonical `@angular/core` names we synthesized and must ensure are imported.
     needed_imports: HashSet<String>,
+    /// Names bound to a **runtime value** (class / enum / function / var / value
+    /// import). A constructor-parameter type is only emitted as a value
+    /// reference in `ctorParameters` when its name is one of these — otherwise
+    /// (interfaces, type aliases, `import type`, utility types like `Pick` /
+    /// `ReadonlyArray`) it would be a `ReferenceError` at DI time, so we emit
+    /// `Object`, matching tsc's `emitDecoratorMetadata`.
+    value_names: HashSet<String>,
     pub changed: bool,
 }
 
@@ -68,6 +75,7 @@ impl JitTransform {
             ng_locals: HashMap::new(),
             ng_namespace: None,
             needed_imports: HashSet::new(),
+            value_names: HashSet::new(),
             changed: false,
         }
     }
@@ -237,10 +245,35 @@ fn type_name_to_expr<'a>(name: &TSTypeName<'a>, ast: AstBuilder<'a>) -> Option<E
     }
 }
 
-fn type_to_expr<'a>(ts_type: &TSType<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
+/// The leftmost identifier of a (possibly-qualified) type name, e.g. `ns` in
+/// `ns.Service` or `Pick` in `Pick<…>`.
+fn type_root_name<'a>(name: &'a TSTypeName<'a>) -> Option<&'a str> {
+    match name {
+        TSTypeName::IdentifierReference(id) => Some(id.name.as_str()),
+        TSTypeName::QualifiedName(q) => type_root_name(&q.left),
+        TSTypeName::ThisExpression(_) => None,
+    }
+}
+
+fn type_to_expr<'a>(
+    ts_type: &TSType<'a>,
+    value_names: &HashSet<String>,
+    ast: AstBuilder<'a>,
+) -> Expression<'a> {
     match ts_type {
         TSType::TSTypeReference(r) => {
-            type_name_to_expr(&r.type_name, ast).unwrap_or_else(|| undefined(ast))
+            // Emit the value reference only when the type's root name resolves to
+            // a runtime value (a class/enum still in scope after type elision).
+            // Utility types (`Pick`/`Omit`/…), structural types (`ReadonlyArray`/
+            // `Array<T>`), interfaces, type aliases and `import type` symbols have
+            // no runtime value, so emit `Object` (matching tsc's
+            // `emitDecoratorMetadata`) rather than a dangling reference.
+            match type_root_name(&r.type_name) {
+                Some(name) if value_names.contains(name) => {
+                    type_name_to_expr(&r.type_name, ast).unwrap_or_else(|| ident("Object", ast))
+                }
+                _ => ident("Object", ast),
+            }
         }
         TSType::TSStringKeyword(_) => ident("String", ast),
         TSType::TSNumberKeyword(_) => ident("Number", ast),
@@ -252,12 +285,63 @@ fn type_to_expr<'a>(ts_type: &TSType<'a>, ast: AstBuilder<'a>) -> Expression<'a>
                 .filter(|t| !matches!(t, TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_)))
                 .collect();
             if non_null.len() == 1 {
-                type_to_expr(non_null[0], ast)
+                type_to_expr(non_null[0], value_names, ast)
             } else {
                 undefined(ast)
             }
         }
         _ => undefined(ast),
+    }
+}
+
+/// Collect names bound to a runtime value (value imports, class/enum
+/// declarations, bare or exported) for [`type_to_expr`].
+fn collect_value_names(stmt: &Statement<'_>, out: &mut HashSet<String>) {
+    match stmt {
+        Statement::ImportDeclaration(import) => {
+            if matches!(import.import_kind, ImportOrExportKind::Type) {
+                return; // `import type { … }` — type-only, elided.
+            }
+            let Some(specs) = &import.specifiers else {
+                return;
+            };
+            for spec in specs {
+                match spec {
+                    ImportDeclarationSpecifier::ImportSpecifier(s)
+                        if !matches!(s.import_kind, ImportOrExportKind::Type) =>
+                    {
+                        out.insert(s.local.name.as_str().to_string());
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                        out.insert(s.local.name.as_str().to_string());
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                        out.insert(s.local.name.as_str().to_string());
+                    }
+                    ImportDeclarationSpecifier::ImportSpecifier(_) => {} // `import { type X }`
+                }
+            }
+        }
+        Statement::ClassDeclaration(c) => {
+            if let Some(id) = &c.id {
+                out.insert(id.name.as_str().to_string());
+            }
+        }
+        Statement::TSEnumDeclaration(e) => {
+            out.insert(e.id.name.as_str().to_string());
+        }
+        Statement::ExportNamedDeclaration(e) => match &e.declaration {
+            Some(Declaration::ClassDeclaration(c)) => {
+                if let Some(id) = &c.id {
+                    out.insert(id.name.as_str().to_string());
+                }
+            }
+            Some(Declaration::TSEnumDeclaration(en)) => {
+                out.insert(en.id.name.as_str().to_string());
+            }
+            _ => {}
+        },
+        _ => {}
     }
 }
 
@@ -288,6 +372,9 @@ fn decorator_metadata<'a>(dec: Decorator<'a>, ast: AstBuilder<'a>) -> Expression
 impl<'a> Traverse<'a, ()> for JitTransform {
     fn enter_program(&mut self, node: &mut Program<'a>, _ctx: &mut TraverseCtx<'a, ()>) {
         for stmt in &node.body {
+            // Track runtime-value bindings (for ctorParameters type emission).
+            collect_value_names(stmt, &mut self.value_names);
+
             let Statement::ImportDeclaration(import) = stmt else {
                 continue;
             };
@@ -621,9 +708,10 @@ impl JitTransform {
         ast: AstBuilder<'a>,
     ) -> (Expression<'a>, bool) {
         // Resolve the type before we touch decorators.
+        let value_names = &self.value_names;
         let type_expr = param.type_annotation.as_ref().map_or_else(
             || undefined(ast),
-            |ann| type_to_expr(&ann.type_annotation, ast),
+            |ann| type_to_expr(&ann.type_annotation, value_names, ast),
         );
 
         let mut keep = ast.vec();
