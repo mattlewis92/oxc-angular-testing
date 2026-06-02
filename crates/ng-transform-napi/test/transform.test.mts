@@ -70,18 +70,42 @@ test('async method downleveled at es2016 is counted once at its real location', 
   );
 });
 
-test('async stays native at older targets, other syntax still downlevels (R10)', () => {
-  // Downleveled async pulls in a separate-realm Promise helper that isn't the
-  // zone-patched global (breaks `expect.any(Promise)`), so async is kept native
-  // even at es2016 — but other downleveling is preserved.
-  const asyncOut = transform('export async function f() { return 1; }', 'f.ts', {
+test('downleveled async inlines the helper and returns the global Promise (R10)', () => {
+  // At es2016 async IS downleveled — but the helper is inlined (not imported from
+  // a separate-realm runtime module), so the result Promise is the module's
+  // global. Under zone.js that's the zone-patched `Promise`, so `instanceof` /
+  // `expect.any(Promise)` hold.
+  const out = transform('export async function f() { return 1; }', 'f.ts', {
     module: 'commonjs',
     jitTransforms: false,
     target: 'es2016',
   }).code;
-  assert.match(asyncOut, /async function f/, 'async kept native');
-  assert.doesNotMatch(asyncOut, /asyncToGenerator|function\*/, 'no async→generator helper');
-  // Downleveling still works for everything else at the same target.
+  assert.match(out, /_asyncToGenerator\(function\*/, 'async downleveled to a generator');
+  assert.doesNotMatch(
+    out,
+    /require\("@oxc-project\/runtime\/helpers\/asyncToGenerator"\)/,
+    'helper inlined, not imported from a separate realm',
+  );
+  assert.match(out, /var _asyncToGenerator = \(function/, 'inline helper definition present');
+
+  // The result Promise is the module's (here reassigned) global Promise.
+  class ZoneAwarePromise extends Promise {}
+  const realPromise = globalThis.Promise;
+  (globalThis as { Promise: PromiseConstructor }).Promise =
+    ZoneAwarePromise as unknown as PromiseConstructor;
+  try {
+    const mod: { exports: { f(): unknown } } = { exports: { f: () => undefined } };
+    // The inlined-helper async output needs no `require`; pass a stub.
+    const noRequire = () => {
+      throw new Error('unexpected require');
+    };
+    new Function('exports', 'module', 'require', out)(mod.exports, mod, noRequire);
+    assert.ok(mod.exports.f() instanceof ZoneAwarePromise, 'returns the global (zone-patched) Promise');
+  } finally {
+    (globalThis as { Promise: PromiseConstructor }).Promise = realPromise;
+  }
+
+  // Other syntax still downlevels at the same target.
   const nullishOut = transform('export const x = a ?? b;', 'g.ts', {
     module: 'commonjs',
     jitTransforms: false,

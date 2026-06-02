@@ -22,6 +22,7 @@ mod jest_hoist;
 mod jit_transform;
 mod options;
 mod resources;
+mod runtime_helpers;
 
 pub use options::{JsxConfig, JsxRuntime, ModuleKind, TransformOptions};
 
@@ -71,6 +72,9 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
     // emit after `"use strict";`.
     let mut did_cjs = false;
     let mut cjs_prelude = String::new();
+    // Inlined async helper(s) (`var _asyncToGenerator = …`) when async is
+    // downleveled — see `runtime_helpers`.
+    let mut async_helper_prelude = String::new();
 
     // Coverage is instrumented up front, on the original AST, before any
     // transform reshapes or synthesizes nodes — so the map reflects the source.
@@ -149,14 +153,9 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         // bad target string. Then layer in the module format.
         let mut env = EnvOptions::from_target(&options.target).unwrap_or_default();
         env.module = module;
-        // Keep `async`/`await` native even at older targets. The tests run on
-        // Node (async is supported), and downleveling it to a generator pulls in
-        // the separate `@oxc-project/runtime/helpers/asyncToGenerator` module
-        // whose `Promise` realm can diverge from the test's zone-patched global
-        // (zone.js) — breaking `expect.any(Promise)` / `instanceof Promise`.
-        // Everything else still downlevels per `target`.
-        env.es2017.async_to_generator = false;
-        env.es2018.async_generator_functions = false;
+        // `async`/`await` downlevels per `target`; the helper it pulls in is then
+        // inlined (see `inline_async_helpers` below) so the result Promise is the
+        // module's global (zone-patched), matching tsc.
         // JSX/TSX (mixed Angular + React). Enabled unconditionally — `.ts` has no
         // JSX so this is inert there; only `.tsx`/`.jsx` are transformed. Runtime
         // + source/factory come from the tsconfig-derived `jsx` config.
@@ -194,6 +193,11 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             .build_with_scoping(scoping, &mut program);
         errors.extend(ret.errors.iter().map(ToString::to_string));
 
+        // Inline the async runtime helper (drop its import) so a downleveled
+        // `async` returns the module's global (zone-patched) Promise. Runs for
+        // both CJS and ESM output, before the ESM→CJS rewrite below.
+        async_helper_prelude = runtime_helpers::inline_async_helpers(&allocator, &mut program);
+
         // CJS mode: rewrite ESM import/export to CommonJS, matching TypeScript's
         // `esModuleInterop` emit. Returns the interop helper prelude text.
         if !options.is_esm() {
@@ -213,7 +217,13 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         .with_source_text(source)
         .build(&program);
 
-    let (code, prefix_lines) = assemble(did_cjs, &cjs_prelude, &coverage_preamble, ret.code);
+    let (code, prefix_lines) = assemble(
+        did_cjs,
+        &cjs_prelude,
+        &async_helper_prelude,
+        &coverage_preamble,
+        ret.code,
+    );
     TransformResult {
         code,
         source_map: ret
@@ -224,13 +234,14 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
     }
 }
 
-/// Prepend, in order: `"use strict";` + the CJS interop prelude (CJS only), then
-/// the coverage preamble (when instrumenting). Returns the assembled code and
-/// the number of prepended lines, so the source map can be shifted to match
-/// (see [`offset_source_map`]).
+/// Prepend, in order: `"use strict";` + the CJS interop prelude (CJS only), the
+/// inlined async helper(s), then the coverage preamble (when instrumenting).
+/// Returns the assembled code and the number of prepended lines, so the source
+/// map can be shifted to match (see [`offset_source_map`]).
 fn assemble(
     did_cjs: bool,
     cjs_prelude: &str,
+    async_helper_prelude: &str,
     coverage_preamble: &str,
     code: String,
 ) -> (String, usize) {
@@ -239,6 +250,7 @@ fn assemble(
         prefix.push_str("\"use strict\";\n");
         prefix.push_str(cjs_prelude);
     }
+    prefix.push_str(async_helper_prelude);
     if !coverage_preamble.is_empty() {
         prefix.push_str(coverage_preamble);
         if !coverage_preamble.ends_with('\n') {
