@@ -6,7 +6,9 @@
 #![deny(clippy::all)]
 
 use napi_derive::napi;
-use ng_transform::{ModuleKind, TransformOptions as NgOptions, transform as ng_transform};
+use ng_transform::{
+    JsxConfig, JsxRuntime, ModuleKind, TransformOptions as NgOptions, transform as ng_transform,
+};
 
 /// Options forwarded to the Rust transform. All fields are optional; omitted
 /// fields fall back to the Rust-side [`NgOptions`] defaults.
@@ -30,6 +32,18 @@ pub struct TransformOptions {
     /// Hoist `jest.mock()` / `jest.unmock()` / etc. above imports
     /// (babel-plugin-jest-hoist). Default `false`; the jest plugin enables it.
     pub hoist_jest_mock: Option<bool>,
+    /// JSX runtime for `.tsx`/`.jsx` (mixed Angular + React): `"automatic"`
+    /// (default) or `"classic"`. Derive from tsconfig `jsx`.
+    pub jsx: Option<String>,
+    /// Automatic-runtime import source (default `"react"`). tsconfig `jsxImportSource`.
+    pub jsx_import_source: Option<String>,
+    /// Classic-runtime factory (default `"React.createElement"`). tsconfig `jsxFactory`.
+    pub jsx_factory: Option<String>,
+    /// Classic-runtime fragment factory (default `"React.Fragment"`).
+    /// tsconfig `jsxFragmentFactory`.
+    pub jsx_fragment_factory: Option<String>,
+    /// `react-jsxdev`: emit JSX debug info (`__source`/`__self`).
+    pub jsx_development: Option<bool>,
     /// ECMAScript target for syntax downleveling (e.g. `"es2017"`, `"esnext"`).
     /// Derive from tsconfig `target`. Default `"esnext"`.
     pub target: Option<String>,
@@ -82,6 +96,16 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
             .unwrap_or(defaults.use_define_for_class_fields),
         jit_transforms: options.jit_transforms.unwrap_or(defaults.jit_transforms),
         hoist_jest_mock: options.hoist_jest_mock.unwrap_or(defaults.hoist_jest_mock),
+        jsx: JsxConfig {
+            runtime: match options.jsx.as_deref() {
+                Some("classic") => JsxRuntime::Classic,
+                _ => JsxRuntime::Automatic,
+            },
+            development: options.jsx_development.unwrap_or(false),
+            import_source: options.jsx_import_source,
+            pragma: options.jsx_factory,
+            pragma_frag: options.jsx_fragment_factory,
+        },
         target: options.target.unwrap_or(defaults.target),
         lower: options.lower.unwrap_or(defaults.lower),
         coverage: options.coverage.unwrap_or(defaults.coverage),

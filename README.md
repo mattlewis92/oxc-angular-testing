@@ -113,8 +113,11 @@ decorator/class helpers the lowering emits.
 | Signal initializer-API decorators (`input()`/`output()`/`model()`/queries) | ✅ `jit_transform.rs` |
 | TS → JS + legacy decorator lowering, ES `target` downleveling | ✅ via `oxc_transformer` |
 | ESM → CommonJS (matches `tsc` `module:commonjs` + `esModuleInterop`) | ✅ `esm_to_cjs.rs` |
+| Dynamic `import()` → `require` (matches `tsc`) | ✅ `esm_to_cjs.rs` |
+| `jest.mock()` hoisting (babel-plugin-jest-hoist) | ✅ `jest_hoist.rs` (jest plugin) |
+| JSX/TSX for mixed Angular + React (automatic/classic, from tsconfig `jsx`) | ✅ via `oxc_transformer` |
 | istanbul coverage in the same AST pass | ✅ vendored `instrument_program` |
-| Options derived from tsconfig (target / module / decorators / `useDefineForClassFields`) | ✅ `transform/src/tsconfig.ts` |
+| Options derived from tsconfig (target / module / decorators / `useDefineForClassFields` / `jsx`) | ✅ `transform/src/tsconfig.ts` |
 | ESM-only dependency downleveling for jest (esbuild-fast-path equivalent) | ✅ jest plugin + `presets.ts` |
 | jest (ESM **and** CommonJS) + vitest plugins, real component integration tests | ✅ |
 

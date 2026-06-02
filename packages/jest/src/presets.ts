@@ -26,11 +26,11 @@ export function createCjsPreset(
 ): JestPresetConfig {
   const opts = { module: 'commonjs', ...transformerOptions };
   return {
-    moduleFileExtensions: ['ts', 'tsx', 'js', 'mjs', 'html', 'svg', 'json'],
+    moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'html', 'svg', 'json'],
     transform: {
       // One transformer for code + content: `.html`/`.svg` are stringified
-      // (via stringifyContentPathRegex), the rest compiled.
-      '^.+\\.(ts|tsx|js|mjs|html|svg)$': [TRANSFORMER, opts],
+      // (via stringifyContentPathRegex), the rest compiled (incl. React .tsx/.jsx).
+      '^.+\\.(ts|tsx|js|jsx|mjs|html|svg)$': [TRANSFORMER, opts],
     },
     // Transform `.mjs` files in node_modules (e.g. @angular/*), ignore the rest.
     transformIgnorePatterns: ['node_modules/(?!.*\\.mjs$)'],
@@ -47,10 +47,10 @@ export function createEsmPreset(
 ): JestPresetConfig {
   const opts = { module: 'esm', ...transformerOptions };
   return {
-    moduleFileExtensions: ['ts', 'tsx', 'mjs', 'js', 'html', 'svg', 'json'],
-    extensionsToTreatAsEsm: ['.ts', '.tsx', '.html', '.svg'],
+    moduleFileExtensions: ['ts', 'tsx', 'mjs', 'js', 'jsx', 'html', 'svg', 'json'],
+    extensionsToTreatAsEsm: ['.ts', '.tsx', '.jsx', '.html', '.svg'],
     transform: {
-      '^.+\\.(ts|tsx|html|svg)$': [TRANSFORMER, opts],
+      '^.+\\.(ts|tsx|jsx|html|svg)$': [TRANSFORMER, opts],
     },
     transformIgnorePatterns: ['node_modules/(?!tslib)'],
     testEnvironment: 'node',

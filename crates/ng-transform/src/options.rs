@@ -17,6 +17,35 @@ pub enum ModuleKind {
     Esm,
 }
 
+/// JSX runtime, mirroring tsconfig `jsx`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JsxRuntime {
+    /// `react-jsx` / `react-jsxdev` — auto-imports from `jsxImportSource`
+    /// (default `react`). The modern default.
+    #[default]
+    Automatic,
+    /// `react` — classic `React.createElement` (`jsxFactory` / `jsxFragmentFactory`).
+    Classic,
+}
+
+/// JSX/TSX transform configuration, for repos that mix Angular and React.
+///
+/// Only affects files that actually contain JSX (`.tsx` / `.jsx`); `.ts` cannot,
+/// so this is inert for Angular-only code. Derived from tsconfig `jsx` /
+/// `jsxImportSource` / `jsxFactory` / `jsxFragmentFactory`.
+#[derive(Debug, Clone, Default)]
+pub struct JsxConfig {
+    pub runtime: JsxRuntime,
+    /// `react-jsxdev`: add `__source` / `__self` debug info.
+    pub development: bool,
+    /// Automatic runtime import source (default `react` when `None`).
+    pub import_source: Option<String>,
+    /// Classic runtime factory (default `React.createElement` when `None`).
+    pub pragma: Option<String>,
+    /// Classic runtime fragment factory (default `React.Fragment` when `None`).
+    pub pragma_frag: Option<String>,
+}
+
 /// Options controlling the Angular transforms and optional coverage pass.
 #[derive(Debug, Clone)]
 pub struct TransformOptions {
@@ -39,6 +68,9 @@ pub struct TransformOptions {
     /// `babel-plugin-jest-hoist`. The jest plugin always enables this; vitest
     /// does its own `vi.mock` hoisting, so it leaves this off.
     pub hoist_jest_mock: bool,
+    /// JSX/TSX transform configuration (mixed Angular + React repos). See
+    /// [`JsxConfig`]. Inert for `.ts` (no JSX).
+    pub jsx: JsxConfig,
     /// ECMAScript target for syntax downleveling, e.g. `"es2017"`, `"es2022"`,
     /// `"esnext"` (the default). Maps to oxc's `EnvOptions::from_target` — derive
     /// it from tsconfig `target`. Only syntax newer than the target is lowered;
@@ -66,6 +98,7 @@ impl Default for TransformOptions {
             use_define_for_class_fields: false,
             jit_transforms: true,
             hoist_jest_mock: false,
+            jsx: JsxConfig::default(),
             target: "esnext".to_string(),
             lower: true,
             coverage: false,

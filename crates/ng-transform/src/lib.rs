@@ -16,7 +16,7 @@ mod jit_transform;
 mod options;
 mod resources;
 
-pub use options::{ModuleKind, TransformOptions};
+pub use options::{JsxConfig, JsxRuntime, ModuleKind, TransformOptions};
 
 use std::path::Path;
 
@@ -27,8 +27,8 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use oxc_transformer::{
-    CompilerAssumptions, DecoratorOptions, EnvOptions, JsxOptions, Module,
-    TransformOptions as OxcTransformOptions, Transformer, TypeScriptOptions,
+    CompilerAssumptions, DecoratorOptions, EnvOptions, JsxOptions, JsxRuntime as OxcJsxRuntime,
+    Module, TransformOptions as OxcTransformOptions, Transformer, TypeScriptOptions,
 };
 use oxc_traverse::traverse_mut;
 
@@ -118,6 +118,19 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         // bad target string. Then layer in the module format.
         let mut env = EnvOptions::from_target(&options.target).unwrap_or_default();
         env.module = module;
+        // JSX/TSX (mixed Angular + React). Enabled unconditionally — `.ts` has no
+        // JSX so this is inert there; only `.tsx`/`.jsx` are transformed. Runtime
+        // + source/factory come from the tsconfig-derived `jsx` config.
+        let mut jsx = JsxOptions::enable();
+        jsx.runtime = match options.jsx.runtime {
+            JsxRuntime::Automatic => OxcJsxRuntime::Automatic,
+            JsxRuntime::Classic => OxcJsxRuntime::Classic,
+        };
+        jsx.development = options.jsx.development;
+        jsx.import_source = options.jsx.import_source.clone();
+        jsx.pragma = options.jsx.pragma.clone();
+        jsx.pragma_frag = options.jsx.pragma_frag.clone();
+        jsx.conform(); // dev mode needs the self/source plugins on
         let oxc_options = OxcTransformOptions {
             typescript: TypeScriptOptions {
                 remove_class_fields_without_initializer: !use_define,
@@ -127,7 +140,7 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
                 set_public_class_fields: !use_define,
                 ..CompilerAssumptions::default()
             },
-            jsx: JsxOptions::disable(),
+            jsx,
             decorator: DecoratorOptions {
                 legacy: options.experimental_decorators,
                 emit_decorator_metadata: options.emit_decorator_metadata,

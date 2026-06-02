@@ -12,6 +12,11 @@ export interface DerivedTransformOptions {
   experimentalDecorators?: boolean;
   emitDecoratorMetadata?: boolean;
   useDefineForClassFields?: boolean;
+  jsx?: 'automatic' | 'classic';
+  jsxImportSource?: string;
+  jsxFactory?: string;
+  jsxFragmentFactory?: string;
+  jsxDevelopment?: boolean;
 }
 
 // ts.ScriptTarget enum value → oxc target string.
@@ -89,5 +94,20 @@ export function deriveTransformOptions(
     options.emitDecoratorMetadata = co.emitDecoratorMetadata;
   }
   if (useDefine !== undefined) options.useDefineForClassFields = useDefine;
+
+  // JSX (mixed Angular + React). ts.JsxEmit: React=2 (classic), ReactJSX=4,
+  // ReactJSXDev=5 (automatic); Preserve=1 / ReactNative=3 → automatic so the
+  // .tsx is still runnable under the test runner.
+  if (co.jsx !== undefined) {
+    if (co.jsx === ts.JsxEmit.React) {
+      options.jsx = 'classic';
+      if (co.jsxFactory) options.jsxFactory = co.jsxFactory;
+      if (co.jsxFragmentFactory) options.jsxFragmentFactory = co.jsxFragmentFactory;
+    } else {
+      options.jsx = 'automatic';
+      options.jsxDevelopment = co.jsx === ts.JsxEmit.ReactJSXDev;
+      if (co.jsxImportSource) options.jsxImportSource = co.jsxImportSource;
+    }
+  }
   return options;
 }

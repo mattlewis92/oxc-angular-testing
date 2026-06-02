@@ -11,6 +11,7 @@ const cjs = {
   ...createCjsPreset(),
   moduleNameMapper: {
     '^@angular/core$': fixture('./test/cjs/fixtures/fake-angular-core.cjs'),
+    '^react/jsx-runtime$': fixture('./test/cjs/fixtures/fake-jsx-runtime.cjs'),
   },
 };
 

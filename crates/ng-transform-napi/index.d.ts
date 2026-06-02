@@ -32,6 +32,22 @@ export interface TransformOptions {
    */
   hoistJestMock?: boolean
   /**
+   * JSX runtime for `.tsx`/`.jsx` (mixed Angular + React): `"automatic"`
+   * (default) or `"classic"`. Derive from tsconfig `jsx`.
+   */
+  jsx?: string
+  /** Automatic-runtime import source (default `"react"`). tsconfig `jsxImportSource`. */
+  jsxImportSource?: string
+  /** Classic-runtime factory (default `"React.createElement"`). tsconfig `jsxFactory`. */
+  jsxFactory?: string
+  /**
+   * Classic-runtime fragment factory (default `"React.Fragment"`).
+   * tsconfig `jsxFragmentFactory`.
+   */
+  jsxFragmentFactory?: string
+  /** `react-jsxdev`: emit JSX debug info (`__source`/`__self`). */
+  jsxDevelopment?: boolean
+  /**
    * ECMAScript target for syntax downleveling (e.g. `"es2017"`, `"esnext"`).
    * Derive from tsconfig `target`. Default `"esnext"`.
    */
