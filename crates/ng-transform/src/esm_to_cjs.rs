@@ -35,11 +35,17 @@ use oxc_traverse::{Traverse, TraverseCtx, traverse_mut};
 
 const IMPORT_DEFAULT: &str = "var __importDefault = (this && this.__importDefault) || function (mod) {\n    return (mod && mod.__esModule) ? mod : { \"default\": mod };\n};\n";
 
+// `__createBinding`'s getter shim is `configurable: true` + settable — a
+// deliberate deviation from tsc's verbatim (non-configurable getter-only) helper.
+// It lets `jest.spyOn(ns, member)` redefine a namespace member from an
+// `import * as ns from 'cjs-dep'` (tsc's shape throws "Cannot redefine property";
+// ts-jest's namespaces happened to be spyable). Read-through via the getter is
+// unchanged; the setter writes back to the source module.
 const IMPORT_STAR: &str = r#"var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
     if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
+      desc = { enumerable: true, configurable: true, get: function() { return m[k]; }, set: function(v) { m[k] = v; } };
     }
     Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
@@ -74,7 +80,7 @@ const EXPORT_STAR: &str = r#"var __createBinding = (this && this.__createBinding
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
     if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
+      desc = { enumerable: true, configurable: true, get: function() { return m[k]; }, set: function(v) { m[k] = v; } };
     }
     Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {

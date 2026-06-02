@@ -149,6 +149,14 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         // bad target string. Then layer in the module format.
         let mut env = EnvOptions::from_target(&options.target).unwrap_or_default();
         env.module = module;
+        // Keep `async`/`await` native even at older targets. The tests run on
+        // Node (async is supported), and downleveling it to a generator pulls in
+        // the separate `@oxc-project/runtime/helpers/asyncToGenerator` module
+        // whose `Promise` realm can diverge from the test's zone-patched global
+        // (zone.js) — breaking `expect.any(Promise)` / `instanceof Promise`.
+        // Everything else still downlevels per `target`.
+        env.es2017.async_to_generator = false;
+        env.es2018.async_generator_functions = false;
         // JSX/TSX (mixed Angular + React). Enabled unconditionally — `.ts` has no
         // JSX so this is inert there; only `.tsx`/`.jsx` are transformed. Runtime
         // + source/factory come from the tsconfig-derived `jsx` config.

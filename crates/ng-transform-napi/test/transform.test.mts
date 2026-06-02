@@ -70,6 +70,37 @@ test('async method downleveled at es2016 is counted once at its real location', 
   );
 });
 
+test('async stays native at older targets, other syntax still downlevels (R10)', () => {
+  // Downleveled async pulls in a separate-realm Promise helper that isn't the
+  // zone-patched global (breaks `expect.any(Promise)`), so async is kept native
+  // even at es2016 — but other downleveling is preserved.
+  const asyncOut = transform('export async function f() { return 1; }', 'f.ts', {
+    module: 'commonjs',
+    jitTransforms: false,
+    target: 'es2016',
+  }).code;
+  assert.match(asyncOut, /async function f/, 'async kept native');
+  assert.doesNotMatch(asyncOut, /asyncToGenerator|function\*/, 'no async→generator helper');
+  // Downleveling still works for everything else at the same target.
+  const nullishOut = transform('export const x = a ?? b;', 'g.ts', {
+    module: 'commonjs',
+    jitTransforms: false,
+    target: 'es2016',
+  }).code;
+  assert.ok(!nullishOut.includes('??'), 'nullish coalescing still downleveled at es2016');
+});
+
+test('namespace import members are spy-friendly: configurable + settable (R12)', () => {
+  // `import * as ns from 'cjs-dep'` → __importStar/__createBinding getter shim.
+  // It must be configurable (so jest.spyOn can redefine) and settable.
+  const out = transform("import * as ns from './m';\nns.x();\n", 'm.ts', {
+    module: 'commonjs',
+    jitTransforms: false,
+  });
+  assert.match(out.code, /configurable: true/, 'namespace getter must be configurable');
+  assert.match(out.code, /set: function\(v\) \{ m\[k\] = v; \}/, 'namespace member must be settable');
+});
+
 test('branch coverage shape is independent of the ES target (source-level)', () => {
   // Instrumenting before downleveling means `?.` is always 2 optional-chain
   // branches — not 1 cond-expr after an es2015 rewrite. This is what keeps
