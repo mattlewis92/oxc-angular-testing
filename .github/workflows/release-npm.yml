@@ -59,7 +59,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # create the GitHub release + tag
       id-token: write # npm provenance + trusted publishing (OIDC)
     env:
       # Token auth for the FIRST release, before trusted publishing is configured
@@ -111,10 +111,12 @@ jobs:
       # Update the main package's optionalDependencies + stamp each platform
       # package.json (os/cpu/version). `--skip-optional-publish`: napi would
       # otherwise publish the platform packages itself — we publish everything in
-      # the idempotent step below instead.
+      # the idempotent step below instead. `--no-gh-release`: napi creates a bare
+      # release (no generated notes) by default; we create it ourselves with
+      # auto-generated notes after publishing (see the final step).
       - name: Update optionalDependencies
         working-directory: crates/ng-transform-napi
-        run: pnpm exec napi prepublish -t npm --npm-dir npm --skip-optional-publish
+        run: pnpm exec napi prepublish -t npm --npm-dir npm --skip-optional-publish --no-gh-release
       # Token auth for the bootstrap release; skipped (→ OIDC) when the secret is
       # unset. `${NPM_TOKEN}` is expanded by pnpm/npm at publish time, so the
       # token value is never written to disk.
@@ -146,3 +148,22 @@ jobs:
           publish crates/ng-transform-napi
           publish packages/jest
           publish packages/vitest
+      # Create the GitHub release with auto-generated notes ("What's Changed")
+      # after a successful publish. Tags the release commit (gh creates the tag
+      # if it doesn't exist, e.g. on workflow_dispatch). Idempotent: skipped if
+      # the release already exists (e.g. a re-run).
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::notice::release $tag already exists — skipping"
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --generate-notes
+          fi
