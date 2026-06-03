@@ -15,11 +15,23 @@ fn cjs_jit(src: &str) -> String {
     transform(src, "m.ts", &opts).code
 }
 
-/// Stand-in for Angular's `isDelegateCtor` (DELEGATE_CTOR regex in
-/// `@angular/core`'s reflection capabilities): an empty-param `constructor()`
-/// whose body's first statement is `super(...arguments)`. We collapse
-/// whitespace and look for the exact `constructor(){super(...arguments)`
-/// adjacency the regex requires.
+/// Stand-in for the reflection regex `@angular/core` uses to decide a derived
+/// class inherits its parent's DI constructor params. Copied from
+/// `@angular/core` **21.2.16**, `packages/core/src/reflection/reflection_capabilities.ts`:
+///
+/// ```text
+/// INHERITED_CLASS_WITH_DELEGATE_CTOR =
+///   /^class\s+[A-Za-z\d$_]*\s*extends\s+[^{]+{[\s\S]*constructor\s*\(\)\s*{[^}]*super\(\.\.\.arguments\)/
+/// ```
+///
+/// (For function-form/ES5 output Angular uses a sibling `DELEGATE_CTOR` regex
+/// keyed on `.apply(this, arguments)`; we emit ES `class` syntax, so the form
+/// above is the relevant one.) The full regex also requires the enclosing
+/// `class … extends …` context; here we collapse whitespace and check the
+/// load-bearing `constructor(){super(...arguments)` adjacency. NOTE: this is a
+/// hand-copied snapshot — Angular has changed this regex across majors, so
+/// re-verify against the cited source on an Angular bump (a real-`@angular/core`
+/// JIT canary would pin it; tracked separately).
 fn matches_angular_delegate_ctor(code: &str) -> bool {
     let collapsed: String = code.split_whitespace().collect();
     collapsed.contains("constructor(){super(...arguments)")
