@@ -24,9 +24,10 @@ use oxc_allocator::Allocator;
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast::ast::{
-    Argument, AssignmentOperator, AssignmentTarget, BindingPattern, Expression,
-    FormalParameterKind, ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind,
-    SimpleAssignmentTarget, Statement, UpdateOperator, VariableDeclarationKind,
+    Argument, AssignmentOperator, AssignmentTarget, AssignmentTargetMaybeDefault,
+    AssignmentTargetProperty, BindingPattern, Expression, FormalParameterKind,
+    ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget,
+    Statement, UpdateOperator, VariableDeclarationKind,
 };
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SPAN};
@@ -265,8 +266,23 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
             .build(program)
             .semantic
             .into_scoping();
-        let symbol_map = build_symbol_map(program, &scoping, &replacements);
-        let live_bindings = build_live_binding_map(program, &scoping);
+        let mut symbol_map = build_symbol_map(program, &scoping, &replacements);
+        // Directly-exported `const`/`let`/`var` route every reference through
+        // `exports.<name>` (tsc model): so `jest.spyOn(ns, name)` intercepts
+        // intra-module calls (R18) and mutable exports are live (R15). Added to
+        // `symbol_map` with the `exports` namespace alongside imports.
+        for (sym, name) in build_directly_exported_map(program) {
+            symbol_map.insert(
+                sym,
+                Replacement {
+                    ns_var: "exports".to_string(),
+                    member: name,
+                },
+            );
+        }
+        // `export { local as ll }` of a module-scope `let`/`var` keeps its local
+        // (tsc keeps the binding) and *mirrors* writes to `exports.ll`.
+        let live_bindings = build_specifier_export_map(program);
         let mut rewriter = RefRewriter {
             symbol_map,
             replacements: replacements.clone(),
@@ -430,20 +446,37 @@ fn build_symbol_map<'a>(
     map
 }
 
-/// Map each module-scope mutable exported binding's `SymbolId` to its exported
-/// name. These are the "live bindings" tsc keeps in sync: every write to such a
-/// binding must also update `exports.<name>` so importers observe the new value.
-///
-/// Two sources of entries (both restricted to module-scope `let`/`var` — `const`
-/// can't be reassigned, and function/class declarations are not live-bound by
-/// tsc):
-/// - `export let x` / `export var x` (directly exported) → x's symbol → "x".
-/// - `export { local as ll }` where `local` is a module-scope `let`/`var` (NOT an
-///   import) → local's symbol → "ll".
-fn build_live_binding_map<'a>(
-    program: &Program<'a>,
-    scoping: &Scoping,
-) -> HashMap<SymbolId, String> {
+/// Directly-exported `const`/`let`/`var` bindings (`export const/let/var x = …`)
+/// → exported name. tsc routes EVERY reference to these through `exports.<name>`
+/// (read, call, and write), so intra-module `jest.spyOn(ns, name)` intercepts and
+/// mutable exports stay live. They are added to `symbol_map` with the `exports`
+/// namespace. (Function/class declarations and `export { local }` specifier
+/// exports are NOT routed — tsc keeps bare local references for those.)
+fn build_directly_exported_map<'a>(program: &Program<'a>) -> HashMap<SymbolId, String> {
+    let mut map: HashMap<SymbolId, String> = HashMap::new();
+    for stmt in &program.body {
+        let Statement::ExportNamedDeclaration(export) = stmt else {
+            continue;
+        };
+        if let Some(oxc_ast::ast::Declaration::VariableDeclaration(v)) = &export.declaration {
+            let mut binders: HashMap<&str, SymbolId> = HashMap::new();
+            for d in &v.declarations {
+                collect_pattern_symbols(&d.id, &mut binders);
+            }
+            for (name, sym) in binders {
+                map.insert(sym, name.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// `export { local as ll }` of a module-scope `let`/`var` (NOT an import) →
+/// local's `SymbolId` → exported name `ll`. tsc keeps the local binding (bare
+/// reads) but MIRRORS each write into `exports.ll` (`exports.ll = local = v`) so
+/// importers observe live values. (Specifier-exported `const` needs no mirror —
+/// it can't be reassigned — so only `let`/`var` are collected here.)
+fn build_specifier_export_map<'a>(program: &Program<'a>) -> HashMap<SymbolId, String> {
     // First collect every module-scope `let`/`var` binding name → SymbolId, so
     // the `export { … }` (alias) branch can resolve a local name to its symbol.
     let mut module_let_var: HashMap<&str, SymbolId> = HashMap::new();
@@ -470,17 +503,10 @@ fn build_live_binding_map<'a>(
         let Statement::ExportNamedDeclaration(export) = stmt else {
             continue;
         };
-        // `export let/var x` — directly exported, name == binding name.
-        if let Some(oxc_ast::ast::Declaration::VariableDeclaration(v)) = &export.declaration {
-            if v.kind != VariableDeclarationKind::Const {
-                let mut binders: HashMap<&str, SymbolId> = HashMap::new();
-                for d in &v.declarations {
-                    collect_pattern_symbols(&d.id, &mut binders);
-                }
-                for (name, sym) in binders {
-                    map.insert(sym, name.to_string());
-                }
-            }
+        // Directly-exported declarations are handled by `build_directly_exported_map`
+        // (routed through `exports`, not mirrored). Only the specifier form below
+        // keeps a local + mirrors writes.
+        if export.declaration.is_some() {
             continue;
         }
         // `export { local as ll }` with no source — alias of a local `let`/`var`.
@@ -493,7 +519,6 @@ fn build_live_binding_map<'a>(
             }
         }
     }
-    let _ = scoping; // SymbolIds are read off binding identifiers directly.
     map
 }
 
@@ -593,6 +618,64 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
             }
             _ => {}
         }
+    }
+
+    // Route a WRITE to a namespaced binding through its namespace object:
+    // `isSharingApp = v` → `flag_1.isSharingApp = v` (import write, R19) and
+    // `exportedLet = v` → `exports.exportedLet = v` (directly-exported, R18). Also
+    // fires for compound assignment, `++`/`--` (the update's argument is a
+    // SimpleAssignmentTarget), and array/property destructuring leaves — so all
+    // resolve to `<ns>.<member>`. Scope-aware via SymbolId: a shadowing local of
+    // the same name resolves to a different symbol and is left untouched.
+    fn enter_simple_assignment_target(
+        &mut self,
+        target: &mut SimpleAssignmentTarget<'a>,
+        ctx: &mut TraverseCtx<'a, ()>,
+    ) {
+        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = target
+            && let Some(repl) = self.reference_replacement(id.reference_id.get(), ctx)
+        {
+            *target = member_target(&repl.ns_var, &repl.member, id.span, ctx.ast);
+        }
+    }
+
+    // Object-shorthand destructuring `({ x } = obj)` where `x` routes → rewrite to
+    // `({ x: <ns>.x } = obj)` (preserving any `= default`). The shorthand binding
+    // is an `IdentifierReference`, not an assignment target, so the
+    // simple-assignment-target hook above can't reach it.
+    fn enter_assignment_target_property(
+        &mut self,
+        prop: &mut AssignmentTargetProperty<'a>,
+        ctx: &mut TraverseCtx<'a, ()>,
+    ) {
+        let AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(ident) = prop else {
+            return;
+        };
+        let Some(repl) = self.reference_replacement(ident.binding.reference_id.get(), ctx) else {
+            return;
+        };
+        let ast = ctx.ast;
+        let span = ident.binding.span;
+        let key = PropertyKey::StaticIdentifier(
+            ast.alloc_identifier_name(span, ast.allocator.alloc_str(ident.binding.name.as_str())),
+        );
+        let member: AssignmentTarget = ast
+            .member_expression_static(
+                span,
+                ast.expression_identifier(span, ast.allocator.alloc_str(&repl.ns_var)),
+                ast.identifier_name(span, ast.allocator.alloc_str(&repl.member)),
+                false,
+            )
+            .into();
+        let binding = match ident.init.take() {
+            Some(init) => AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(
+                ast.alloc(ast.assignment_target_with_default(span, member, init)),
+            ),
+            None => AssignmentTargetMaybeDefault::from(member),
+        };
+        *prop = AssignmentTargetProperty::AssignmentTargetPropertyProperty(
+            ast.alloc(ast.assignment_target_property_property(span, key, binding, false)),
+        );
     }
 
     fn enter_expression(&mut self, expr: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
@@ -894,6 +977,22 @@ fn member_at<'a>(
     span: oxc_span::Span,
     ast: AstBuilder<'a>,
 ) -> Expression<'a> {
+    ast.member_expression_static(
+        span,
+        ast.expression_identifier(span, ast.allocator.alloc_str(object)),
+        ast.identifier_name(span, ast.allocator.alloc_str(property)),
+        false,
+    )
+    .into()
+}
+
+/// `<object>.<property>` as a [`SimpleAssignmentTarget`] (write position).
+fn member_target<'a>(
+    object: &str,
+    property: &str,
+    span: oxc_span::Span,
+    ast: AstBuilder<'a>,
+) -> SimpleAssignmentTarget<'a> {
     ast.member_expression_static(
         span,
         ast.expression_identifier(span, ast.allocator.alloc_str(object)),

@@ -349,45 +349,48 @@ fn real_esm_module_still_gets_the_marker() {
 // --- R15: live bindings for exported mutable (`let`/`var`) bindings ----------
 
 #[test]
-fn exported_let_write_updates_exports_live_binding() {
-    // A later write to `link` must also update `exports.link` so importers see
-    // the new value (tsc routes the write through `exports`). We keep the local
-    // `let link` as the read source-of-truth and mirror: `exports.link = link = v`.
+fn exported_let_write_routes_through_exports() {
+    // A directly-exported `let` routes every reference through `exports.<name>`
+    // (tsc model), so a later write is `exports.link = v` and importers see it live.
     let code = cjs("export let link;\nexport function setLink(v) { link = v; }\n");
-    assert!(code.contains("exports.link = link = v"), "{code}");
+    assert!(code.contains("exports.link = v;"), "{code}");
 }
 
 #[test]
 fn exported_let_shadowing_local_is_not_rewritten() {
     // An inner binding (here a param) that shadows the exported name has its own
-    // SymbolId, so its write must NOT touch `exports.link`.
+    // SymbolId, so its write must stay a bare local — never `exports.link`.
     let code =
         cjs("export let link = 1;\nexport function shadow(link) { link = 99; return link; }\n");
+    assert!(code.contains("link = 99"), "param write kept bare: {code}");
     assert!(
-        !code.contains("exports.link = link = 99"),
+        !code.contains("exports.link = 99"),
         "shadowed write leaked to exports: {code}"
     );
 }
 
 #[test]
-fn exported_const_is_not_rewritten() {
-    // `const` can't be reassigned; tsc keeps `const k = …; exports.k = k;` and
-    // never wraps writes (there are none). No `exports.k = k = …` should appear.
+fn exported_const_reads_route_through_exports() {
+    // R18: a directly-exported `const` routes its reads through `exports.k` so an
+    // intra-module `jest.spyOn(ns, 'k')` is observed. The declaration keeps the
+    // local + `exports.k = k`; sibling references become `exports.k`.
     let code = cjs("export const k = 1;\nexport function f() { return k; }\n");
-    assert!(!code.contains("exports.k = k ="), "{code}");
     assert!(code.contains("exports.k = k;"), "{code}");
+    assert!(
+        code.contains("return exports.k;"),
+        "sibling read routed: {code}"
+    );
 }
 
 #[test]
 fn exported_let_compound_and_update_assignments() {
-    // Compound `+=` and prefix/postfix `++` must all mirror into `exports`.
+    // Compound `+=` and prefix/postfix `++` all route through `exports.count`.
     let code = cjs(
         "export let count = 0;\nexport function add(n) { count += n; }\nexport function inc() { return ++count; }\nexport function post() { return count++; }\n",
     );
-    assert!(code.contains("exports.count = count += n"), "{code}");
-    assert!(code.contains("exports.count = ++count"), "{code}");
-    // postfix: yields the old value while exports/local get the new one.
-    assert!(code.contains("(exports.count = ++count) - 1"), "{code}");
+    assert!(code.contains("exports.count += n"), "{code}");
+    assert!(code.contains("++exports.count"), "{code}");
+    assert!(code.contains("exports.count++"), "{code}");
 }
 
 #[test]
@@ -404,4 +407,84 @@ fn export_specifier_alias_of_local_let_is_live() {
     // name `exports.b`, not `exports.a`.
     let code = cjs("let a = 0;\nexport { a as b };\nexport function set(v) { a = v; }\n");
     assert!(code.contains("exports.b = a = v"), "{code}");
+}
+
+// --- R18: intra-module references to exported bindings route through `exports` --
+
+#[test]
+fn intra_module_call_to_export_const_routes_through_exports() {
+    // R18: a sibling call to a directly-exported `const` must go through
+    // `(0, exports.fn)(…)` so `jest.spyOn(ns, 'fn')` intercepts it (it swaps
+    // `exports.fn`). A bare local call would bypass the spy.
+    let code = cjs(concat!(
+        "export const getPastGroupDate = (d) => 'past:' + d;\n",
+        "export const getGroup = (d) => getPastGroupDate(d);\n",
+    ));
+    assert!(
+        code.contains("(0, exports.getPastGroupDate)(d)"),
+        "sibling call routed through exports: {code}"
+    );
+}
+
+#[test]
+fn exported_function_and_class_keep_bare_intra_module_refs() {
+    // tsc does NOT route function/class declarations (they're hoisted, referenced
+    // by local name + `exports.x = x`). Only `export const/let/var` route.
+    let fn_code = cjs("export function f(){ return 1; }\nexport const g = () => f();");
+    assert!(
+        fn_code.contains("=> f()"),
+        "function ref stays bare: {fn_code}"
+    );
+    let cls = cjs("export class C {}\nexport const make = () => new C();");
+    assert!(cls.contains("new C()"), "class ref stays bare: {cls}");
+}
+
+#[test]
+fn destructuring_writes_to_exported_let_route_through_exports() {
+    // Array, object-shorthand (with default), and renamed destructuring leaves all
+    // route to `exports.<name>` (closes the prior R15 destructuring gap).
+    let code = cjs(concat!(
+        "export let a = 0, b = 0;\n",
+        "[a, b] = [1, 2];\n",
+        "({ a } = { a: 9 });\n",
+        "({ x: b } = { x: 7 });\n",
+    ));
+    assert!(
+        code.contains("[exports.a, exports.b] = [1, 2]"),
+        "array: {code}"
+    );
+    assert!(
+        code.contains("({a: exports.a} = { a: 9 })"),
+        "shorthand: {code}"
+    );
+    assert!(
+        code.contains("({x: exports.b} = { x: 7 })"),
+        "renamed: {code}"
+    );
+}
+
+// --- R19: writes to imported bindings route through the import namespace --------
+
+#[test]
+fn write_to_imported_binding_routes_through_namespace() {
+    // R19: a spec stubbing an imported value (`isSharingApp = false`) must become
+    // `flag_1.isSharingApp = false` — a bare assignment is undeclared (ReferenceError
+    // under "use strict") and never updates the namespace. Reads were already routed.
+    let code = cjs(concat!(
+        "import { isSharingApp } from './flag';\n",
+        "isSharingApp = false;\n",
+        "export const x = isSharingApp;\n",
+    ));
+    assert!(
+        code.contains("flag_1.isSharingApp = false"),
+        "import write routed: {code}"
+    );
+    assert!(
+        code.contains("flag_1.isSharingApp"),
+        "read still routed: {code}"
+    );
+    assert!(
+        !code.contains("\nisSharingApp = false"),
+        "no bare undeclared write: {code}"
+    );
 }
