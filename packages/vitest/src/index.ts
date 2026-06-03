@@ -1,10 +1,79 @@
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
+import * as path from 'node:path';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
 import {
   deriveTransformOptions,
   type DerivedTransformOptions,
 } from '@oxc-angular-testing/transform/tsconfig';
 import type { Plugin, ResolvedConfig } from 'vite';
+
+const require_ = createRequire(import.meta.url);
+
+// Verify, once per process, that the istanbul the istanbul coverage provider uses
+// recognizes our emitted coverage schema marker (`_coverageSchema`). istanbul's
+// `readInitialCoverage` silently SKIPS (does not throw) an unrecognized marker, so
+// a schema change would drop never-imported files from coverage with no error.
+// Round-trip a probe through the consumer's own istanbul and fail loudly otherwise.
+let coverageSchemaChecked = false;
+function verifyCoverageSchemaOnce(): void {
+  if (coverageSchemaChecked) return;
+  coverageSchemaChecked = true;
+
+  let readInitialCoverage: ((code: string) => unknown) | undefined;
+  let version = 'unknown';
+  const bases: string[] = [];
+  for (const pkg of ['@vitest/coverage-istanbul', 'vitest']) {
+    try {
+      bases.push(path.dirname(require_.resolve(`${pkg}/package.json`)));
+    } catch {
+      /* not installed; try the next */
+    }
+  }
+  for (const base of bases) {
+    try {
+      const ili = require_(
+        require_.resolve('istanbul-lib-instrument', { paths: [base] }),
+      ) as { readInitialCoverage?: (code: string) => unknown };
+      if (typeof ili.readInitialCoverage === 'function') {
+        readInitialCoverage = ili.readInitialCoverage.bind(ili);
+        try {
+          version = (
+            require_(
+              require_.resolve('istanbul-lib-instrument/package.json', { paths: [base] }),
+            ) as { version: string }
+          ).version;
+        } catch {
+          /* keep 'unknown' */
+        }
+        break;
+      }
+    } catch {
+      /* try the next base */
+    }
+  }
+
+  if (!readInitialCoverage) {
+    console.warn(
+      '@oxc-angular-testing/vitest: could not resolve istanbul-lib-instrument to verify the ' +
+        'coverage schema marker; skipping the check. (Never-imported-file coverage relies on it.)',
+    );
+    return;
+  }
+  const probe = transform('const __oxc_probe__ = 1;\n', '__oxc_coverage_probe__.ts', {
+    coverage: true,
+    module: 'commonjs',
+    jitTransforms: false,
+  });
+  if (!readInitialCoverage(probe.code)) {
+    throw new Error(
+      `@oxc-angular-testing/vitest: your installed istanbul-lib-instrument@${version} does not ` +
+        "recognize this transform's coverage schema marker, so never-imported files would be " +
+        'silently dropped from coverage. This usually means istanbul changed its coverage schema — ' +
+        'please file an issue against @oxc-angular-testing.',
+    );
+  }
+}
 
 const TS_RE = /\.[cm]?tsx?(\?|$)/;
 const NODE_MODULES_RE = /\/node_modules\//;
@@ -98,6 +167,7 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
           // tsconfig-derived options nor an explicit override can select CJS.
           module: 'esm',
         };
+        if (opts.coverage) verifyCoverageSchemaOnce();
         const out = transform(code, id.split('?')[0]!, opts);
         if (out.errors && out.errors.length > 0) {
           this.error(out.errors.join('\n'));

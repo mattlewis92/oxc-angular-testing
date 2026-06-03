@@ -76,6 +76,12 @@ unmodified from crates.io.
    one optional-call *branch* counter is missing. Recording it correctly would need
    a receiver-preserving rewrite (a temp-bound receiver), not the `cov_oc` wrapper.
 
+7. **`src/transform.rs`** (`generate_preamble_source`) — `debug_assert!` that the
+   serialized coverage JSON starts with `{` before the `_coverageSchema` splice, so
+   the else-branch (which would emit the preamble WITHOUT the marker, silently
+   re-breaking never-imported-file coverage) can't be taken unnoticed in test builds.
+   Test-only; no release behavior change. Re-apply on re-sync.
+
 No other `src/*.rs` change.
 
 ## Wiring

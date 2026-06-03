@@ -30,6 +30,9 @@ describe('@oxc-angular-testing/jest — coverage instrumentation', () => {
     expect(out.code).toContain('statementMap');
     expect(out.code).toContain('fnMap');
     expect(out.code).toContain('branchMap'); // the if/else is tracked
+    // istanbul's readInitialCoverage marker reaches the consumer (and the plugin's
+    // one-time self-check against the installed istanbul ran here without throwing).
+    expect(out.code).toContain('_coverageSchema');
   });
 
   it('does not instrument when coverage is off', () => {

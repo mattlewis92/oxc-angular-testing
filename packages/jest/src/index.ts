@@ -21,6 +21,76 @@ function expandRootDir(p: string, rootDir: string | undefined): string {
   return p;
 }
 
+// Verify, once per worker process, that the istanbul this project actually uses
+// recognizes our emitted coverage schema marker. jest's `generateEmptyCoverage`
+// calls `istanbul-lib-instrument`'s `readInitialCoverage` to report never-imported
+// `collectCoverageFrom` files as 0%; if istanbul ever changes its schema, that call
+// silently SKIPS our output (it doesn't throw) and those files vanish from the
+// report. Round-trip a probe through the consumer's own istanbul and fail loudly if
+// it isn't recognized.
+let coverageSchemaChecked = false;
+function verifyCoverageSchemaOnce(): void {
+  if (coverageSchemaChecked) return;
+  coverageSchemaChecked = true;
+
+  // Resolve the istanbul-lib-instrument jest itself uses (relative to jest /
+  // @jest/reporters), falling back to this package's own resolution.
+  let readInitialCoverage: ((code: string) => unknown) | undefined;
+  let version = 'unknown';
+  const bases: string[] = [];
+  for (const pkg of ['jest', '@jest/reporters']) {
+    try {
+      bases.push(path.dirname(require.resolve(`${pkg}/package.json`)));
+    } catch {
+      /* not installed under this name; try the next */
+    }
+  }
+  bases.push(__dirname);
+  for (const base of bases) {
+    try {
+      const ili = require(
+        require.resolve('istanbul-lib-instrument', { paths: [base] }),
+      ) as { readInitialCoverage?: (code: string) => unknown };
+      if (typeof ili.readInitialCoverage === 'function') {
+        readInitialCoverage = ili.readInitialCoverage.bind(ili);
+        try {
+          version = (
+            require(
+              require.resolve('istanbul-lib-instrument/package.json', { paths: [base] }),
+            ) as { version: string }
+          ).version;
+        } catch {
+          /* keep 'unknown' */
+        }
+        break;
+      }
+    } catch {
+      /* try the next base */
+    }
+  }
+
+  if (!readInitialCoverage) {
+    console.warn(
+      '@oxc-angular-testing/jest: could not resolve istanbul-lib-instrument to verify the ' +
+        'coverage schema marker; skipping the check. (Never-imported-file coverage relies on it.)',
+    );
+    return;
+  }
+  const probe = transform('const __oxc_probe__ = 1;\n', '__oxc_coverage_probe__.ts', {
+    coverage: true,
+    module: 'commonjs',
+    jitTransforms: false,
+  });
+  if (!readInitialCoverage(probe.code)) {
+    throw new Error(
+      `@oxc-angular-testing/jest: your installed istanbul-lib-instrument@${version} does not ` +
+        "recognize this transform's coverage schema marker, so never-imported files would be " +
+        'silently dropped from coverage. This usually means istanbul changed its coverage schema — ' +
+        'please file an issue against @oxc-angular-testing.',
+    );
+  }
+}
+
 /** The per-file `options` jest passes to a transformer (the slice we read). */
 interface JestTransformOptions {
   instrument?: boolean;
@@ -179,6 +249,7 @@ export function createTransformer(
           ? { jitTransforms: false, hoistJestMock: false }
           : { hoistJestMock: true }),
       };
+      if (opts.coverage) verifyCoverageSchemaOnce();
       const out = transform(sourceText, sourcePath, opts);
       if (out.errors && out.errors.length > 0) {
         throw new Error(`@oxc-angular-testing/jest: ${out.errors.join('\n')}`);
