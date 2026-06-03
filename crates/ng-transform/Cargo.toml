@@ -25,3 +25,11 @@ serde_json.workspace = true
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
 oxc_sourcemap = "6"
+# Used by the delegate_ctor pre-rewrite canary to drive oxc's transformer directly
+# and assert the synthesized derived-ctor shape our DelegateCtorTransform keys on.
+oxc_allocator.workspace = true
+oxc_codegen.workspace = true
+oxc_parser.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_transformer.workspace = true

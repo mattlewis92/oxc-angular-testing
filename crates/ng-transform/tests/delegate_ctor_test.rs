@@ -57,6 +57,88 @@ export class Child extends Base { x = 1; }
 }
 
 #[test]
+fn oxc_synthesizes_the_expected_delegate_ctor_shape() {
+    // Pre-rewrite CANARY against oxc itself. DelegateCtorTransform's matcher is keyed
+    // to the exact shape oxc 0.126 synthesizes for a derived class's field-init
+    // constructor: `constructor(...<ident>) { super(...<ident>); … }`. Run oxc's
+    // transformer ALONE — the same env our pipeline uses (es2016 + set_public_class_fields)
+    // and WITHOUT our delegate-ctor pass — and assert that shape. An oxc upgrade that
+    // changes the shape (positional param before rest, `super.apply(this, arguments)`,
+    // field-init moved to a helper, …) then fails HERE, naming oxc as the cause,
+    // instead of letting delegate_ctor silently no-op and drop inherited DI params.
+    use oxc_allocator::Allocator;
+    use oxc_codegen::Codegen;
+    use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
+    use oxc_span::SourceType;
+    use oxc_transformer::{CompilerAssumptions, EnvOptions, TransformOptions, Transformer};
+    use std::path::Path;
+
+    let allocator = Allocator::default();
+    let source = "class Child extends Base { x = 1; }\n";
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let mut program = ret.program;
+    let scoping = SemanticBuilder::new()
+        .build(&program)
+        .semantic
+        .into_scoping();
+    let options = TransformOptions {
+        env: EnvOptions::from_target("es2016").unwrap(),
+        assumptions: CompilerAssumptions {
+            set_public_class_fields: true, // mirrors useDefineForClassFields: false
+            ..CompilerAssumptions::default()
+        },
+        ..TransformOptions::default()
+    };
+    Transformer::new(&allocator, Path::new("child.ts"), &options)
+        .build_with_scoping(scoping, &mut program);
+    let code = Codegen::new().build(&program).code;
+    let collapsed: String = code.split_whitespace().collect();
+
+    // A single rest param bound to a plain ident, delegating via `super(...<same ident>)`.
+    // Name-agnostic (oxc may rename the rest) — only the SHAPE matters.
+    let marker = "constructor(...";
+    let start = collapsed.find(marker).unwrap_or_else(|| {
+        panic!("oxc no longer synthesizes a rest-param delegate ctor — DelegateCtorTransform's matcher is stale:\n{code}")
+    });
+    let after = &collapsed[start + marker.len()..];
+    let ident_end = after
+        .find(')')
+        .expect("malformed synthesized ctor param list");
+    let ident = &after[..ident_end];
+    assert!(
+        !ident.is_empty()
+            && ident
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$'),
+        "rest binding must be a single plain identifier (got {ident:?}):\n{code}"
+    );
+    assert!(
+        collapsed.contains(&format!("super(...{ident})")),
+        "synthesized ctor must delegate via super(...{ident}):\n{code}"
+    );
+}
+
+#[test]
+fn derived_class_without_fields_synthesizes_no_constructor() {
+    // Pins the "when does oxc synthesize a delegate ctor" assumption: with NO class
+    // fields (nothing to host) and no explicit ctor, oxc synthesizes no constructor
+    // at all, so delegate_ctor correctly no-ops and Angular inherits DI params via its
+    // INHERITED_CLASS path (not the delegate-ctor path). If oxc ever started emitting a
+    // ctor here, this fails and we re-examine the rewrite's scope.
+    let code = cjs_jit(
+        r#"import { Injectable } from '@angular/core';
+@Injectable()
+export class Child extends Base {}
+"#,
+    );
+    assert!(
+        !code.contains("constructor"),
+        "no constructor should be synthesized for a field-less derived class: {code}"
+    );
+}
+
+#[test]
 fn explicit_ctor_is_unchanged() {
     let code = cjs_jit(
         r#"import { Injectable } from '@angular/core';
