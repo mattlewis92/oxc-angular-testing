@@ -166,6 +166,31 @@ export class MyComponent {
 }
 
 #[test]
+fn namespace_core_import_emits_dedicated_named_import_for_synthesized_symbols() {
+    // `import * as ng from '@angular/core'` cannot also carry named specifiers, so
+    // the synthesized `Input` (the @Input decorator references it as a bare name)
+    // must be emitted as its own `import { Input } from '@angular/core'` — NOT
+    // merged into the namespace import (which would be `import * as ng, { Input }`,
+    // a SyntaxError).
+    let code = ts(r#"import * as ng from '@angular/core';
+@ng.Component({ template: '' })
+export class MyComponent {
+  disabled = ng.input<boolean>(false);
+}
+"#);
+    let collapsed: String = code.split_whitespace().collect();
+    assert!(
+        !collapsed.contains("asng,{"),
+        "synthesized symbols must not be merged into the namespace import: {code}"
+    );
+    assert!(
+        collapsed.contains(r#"import{Input}from"@angular/core""#),
+        "expected a dedicated named import of the synthesized Input: {code}"
+    );
+    assert!(code.contains("isSignal: true"), "{code}");
+}
+
+#[test]
 fn signal_inputs_survive_coverage_instrumentation() {
     // R13: source-level coverage runs first and wraps the field initializer as
     // `foo = (++cov.s[N], input(...))`. The signal-API detector must see through

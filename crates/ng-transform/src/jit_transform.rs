@@ -312,6 +312,17 @@ fn type_to_expr<'a>(
 
 /// Collect names bound to a runtime value (value imports, class/enum
 /// declarations, bare or exported) for [`type_to_expr`].
+/// `true` if `import` has a namespace specifier (`import * as ns from …`). Such a
+/// declaration cannot also carry named specifiers, so synthesized symbols must go
+/// in a separate `import { … }` statement rather than be merged into it.
+fn import_has_namespace(import: &oxc_ast::ast::ImportDeclaration<'_>) -> bool {
+    import.specifiers.as_ref().is_some_and(|specs| {
+        specs
+            .iter()
+            .any(|s| matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)))
+    })
+}
+
 fn collect_value_names(stmt: &Statement<'_>, out: &mut HashSet<String>) {
     match stmt {
         Statement::ImportDeclaration(import) => {
@@ -496,9 +507,17 @@ impl<'a> Traverse<'a, ()> for JitTransform {
             return;
         }
 
-        // Append specifiers to the first @angular/core import, or create one.
+        // Merge the synthesized named specifiers into the first NAMED @angular/core
+        // import (a default + named import is valid). A namespace import
+        // (`import * as ng from '@angular/core'`) cannot carry named specifiers in
+        // the same declaration — `import * as ng, { Input }` is a SyntaxError — so
+        // skip it and emit a dedicated `import { … } from '@angular/core'` below.
         let existing = node.body.iter_mut().find_map(|s| match s {
-            Statement::ImportDeclaration(i) if i.source.value.as_str() == ANGULAR_CORE => Some(i),
+            Statement::ImportDeclaration(i)
+                if i.source.value.as_str() == ANGULAR_CORE && !import_has_namespace(i) =>
+            {
+                Some(i)
+            }
             _ => None,
         });
         match existing {
