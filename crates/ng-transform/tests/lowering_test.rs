@@ -76,3 +76,24 @@ fn target_esnext_preserves_modern_syntax() {
     assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
     assert!(out.code.contains("??"), "should preserve ??: {}", out.code);
 }
+
+// The "every emitted target round-trips through oxc" canary lives JS-side
+// (crates/ng-transform-napi/test/transform.test.mts) where it can iterate the
+// real `scriptTargetToString` map over every `ts.ScriptTarget`, tying the JS
+// vocabulary to oxc's `EnvOptions::from_target`. This Rust test only pins the
+// fail-loud behavior for an unknown string.
+#[test]
+fn unknown_es_target_is_a_loud_error() {
+    // A typo'd/unknown target must surface a diagnostic (the plugins throw on it)
+    // rather than silently degrade to no downleveling.
+    let opts = TransformOptions {
+        target: "es9999".to_string(),
+        ..TransformOptions::default()
+    };
+    let out = transform("export const x = 1;\n", "x.ts", &opts);
+    assert!(
+        out.errors.iter().any(|e| e.contains("es9999")),
+        "expected an unknown-target diagnostic: {:?}",
+        out.errors
+    );
+}

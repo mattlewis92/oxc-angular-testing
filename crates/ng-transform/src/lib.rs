@@ -147,9 +147,21 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         // tsconfig `useDefineForClassFields: false` ⇒ emit class fields as plain
         // assignments (oxc: `set_public_class_fields` + strip uninitialized fields).
         let use_define = options.use_define_for_class_fields;
-        // ES target drives syntax downleveling; fall back to no downleveling on a
-        // bad target string. Then layer in the module format.
-        let mut env = EnvOptions::from_target(&options.target).unwrap_or_default();
+        // ES target drives syntax downleveling. An unrecognized target must NOT be
+        // silently swallowed into the default (no-downleveling) env: for this project
+        // that is a silent miscompile (async stops being downleveled, so it is no
+        // longer zone-aware). Push a diagnostic — the plugins throw on `errors` — so
+        // a typo'd target or an oxc rename fails loudly instead. Then layer in module.
+        let mut env = match EnvOptions::from_target(&options.target) {
+            Ok(env) => env,
+            Err(err) => {
+                errors.push(format!(
+                    "unknown ES target {:?}: {err} (expected es5–es2024 or esnext)",
+                    options.target
+                ));
+                EnvOptions::default()
+            }
+        };
         env.module = module;
         // `async`/`await` downlevels per `target`, pulling in oxc's runtime
         // `asyncToGenerator` helper (imported from `@oxc-project/runtime`). Its

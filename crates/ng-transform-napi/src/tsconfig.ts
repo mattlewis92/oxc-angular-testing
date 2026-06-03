@@ -21,8 +21,10 @@ export interface DerivedTransformOptions {
 
 // ts.ScriptTarget enum value → oxc target string.
 const SCRIPT_TARGET: Record<number, string> = {
-  0: 'es5', // ES3 (oxc has no es3; es5 is the floor)
-  1: 'es5',
+  // oxc's downlevel floor is es2015 ("es5" is explicitly rejected by its
+  // EnvOptions::from_target), so ES3/ES5 clamp up to es2015 — the lowest oxc emits.
+  0: 'es2015', // ES3
+  1: 'es2015', // ES5
   2: 'es2015',
   3: 'es2016',
   4: 'es2017',

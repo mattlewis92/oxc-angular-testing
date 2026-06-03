@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { transform } from '../index.js';
+import { scriptTargetToString } from '../dist/tsconfig.js';
 
 const COMPONENT = `import { Component } from '@angular/core';
 @Component({
@@ -138,6 +139,25 @@ test('coverage keeps the `this` receiver on optional-chaining method calls (R22)
   };
   new Function('exports', 'module', 'require', out)(mod.exports, mod, noRequire);
   assert.equal(mod.exports.callMethod(mod.exports.makeObj()), 42, 'this.value via obj?.getValue?.()');
+});
+
+test('every SCRIPT_TARGET string round-trips through oxc (target-vocabulary canary)', () => {
+  // tsconfig.ts maps every `ts.ScriptTarget` to one of these strings, and each MUST
+  // be accepted by oxc's `EnvOptions::from_target`. A mismatch (e.g. the old ES3/ES5
+  // → 'es5', which oxc rejects) used to be swallowed into no-downleveling — a silent
+  // miscompile. The transform now pushes a diagnostic on a bad target, so this canary
+  // turns a JS↔oxc vocabulary drift (an oxc rename, or a new mapping oxc doesn't know)
+  // into a named CI failure. Keys are the numeric `ts.ScriptTarget` enum values.
+  const scriptTargets = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 99];
+  for (const k of scriptTargets) {
+    const target = scriptTargetToString(k);
+    const out = transform('export const x = 1;', 'x.ts', { target, jitTransforms: false });
+    assert.equal(
+      out.errors.length,
+      0,
+      `target "${target}" (ScriptTarget ${k}) was rejected by oxc: ${out.errors.join(', ')}`,
+    );
+  }
 });
 
 test('namespace import members are spy-friendly: configurable + settable (R12)', () => {
