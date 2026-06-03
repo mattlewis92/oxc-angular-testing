@@ -571,7 +571,14 @@ impl JitTransform {
         &self,
         call: &oxc_ast::ast::CallExpression<'a>,
     ) -> Option<Initializer> {
-        // `input.required(...)` / `model.required(...)` → callee is `<base>.required`.
+        // `<base>.required(...)` → callee is `<base>.required`. Covers the signal
+        // input/model required forms AND the required single-child queries
+        // (`viewChild.required`/`contentChild.required`). The query metadata is
+        // identical to the non-required variant — required-ness isn't encoded in
+        // the decorator args (Angular reads it off the runtime RequiredSignal), so
+        // the only thing that matters is that we don't skip the `.required` member
+        // call when collecting query metadata (else the query gets no
+        // `propDecorators` entry and Angular never registers it → NG0951).
         if let Expression::StaticMemberExpression(m) = &call.callee
             && m.property.name.as_str() == "required"
             && let Some(base) = self.ng_name(&m.object)
@@ -579,6 +586,8 @@ impl JitTransform {
             return match base.as_str() {
                 "input" => Some(Initializer::Input { required: true }),
                 "model" => Some(Initializer::Model { required: true }),
+                "viewChild" => Some(Initializer::Query("ViewChild")),
+                "contentChild" => Some(Initializer::Query("ContentChild")),
                 _ => None,
             };
         }

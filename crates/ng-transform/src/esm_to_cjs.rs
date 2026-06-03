@@ -113,6 +113,17 @@ struct HelperNeeds {
 /// code. Helpers are emitted as text rather than spliced AST so their (foreign)
 /// spans never reach the codegen source-map builder.
 #[must_use]
+/// How a module specifier's `require(...)` is wrapped, aggregated across every
+/// import statement for that source (tsc's `esModuleInterop` rule).
+enum ImportKind {
+    /// `__importStar(require(...))` — any namespace import, or mixed default+named.
+    Star,
+    /// `__importDefault(require(...))` — default import(s) only.
+    Default,
+    /// `require(...)` — named import(s) only.
+    Plain,
+}
+
 /// Result of the ESM→CJS rewrite.
 pub struct CjsResult {
     /// Interop helper text the caller prepends after `"use strict";`.
@@ -143,36 +154,84 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
         )
     });
 
-    // 1. Assign a module var per source and a replacement per default/named local.
+    // 1. Aggregate every import statement per source, then pick a canonical var +
+    //    import kind per source. A module may be imported by several statements; the
+    //    canonical var prefers a namespace local, so `import { x }` + `import * as ns`
+    //    of the SAME module share one `__importStar` binding (matching tsc) and the
+    //    namespace local is always declared — regardless of statement order.
+    //    (Previously a namespace import that FOLLOWED a named import for the same
+    //    specifier was folded away, its local left undeclared → `ReferenceError`.)
     let mut module_vars: HashMap<String, String> = HashMap::new();
     let mut used_names: HashMap<String, u32> = HashMap::new();
     let mut replacements: HashMap<String, Replacement> = HashMap::new();
     let mut needs = HelperNeeds::default();
 
+    #[derive(Default)]
+    struct SourceAgg {
+        ns_local: Option<String>,
+        has_default: bool,
+        has_named: bool,
+        has_namespace: bool,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut agg: HashMap<String, SourceAgg> = HashMap::new();
     for stmt in &program.body {
         let Statement::ImportDeclaration(import) = stmt else {
             continue;
         };
-        let source = import.source.value.as_str().to_string();
         let Some(specifiers) = &import.specifiers else {
             continue; // side-effect only
         };
-        let has_namespace = specifiers
-            .iter()
-            .any(|s| matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)));
-        // A namespace import names the var after the local namespace binding.
-        if let Some(ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns)) = specifiers
-            .iter()
-            .find(|s| matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)))
-        {
-            module_vars
-                .entry(source.clone())
-                .or_insert_with(|| ns.local.name.as_str().to_string());
+        let source = import.source.value.as_str().to_string();
+        if !agg.contains_key(&source) {
+            order.push(source.clone());
         }
-        let ns_var = module_vars
-            .entry(source.clone())
-            .or_insert_with(|| unique_module_var(&source, &mut used_names))
-            .clone();
+        let e = agg.entry(source).or_default();
+        for spec in specifiers {
+            match spec {
+                ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                    if s.imported.name().as_str() == "default" {
+                        e.has_default = true;
+                    } else {
+                        e.has_named = true;
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => e.has_default = true,
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
+                    e.has_namespace = true;
+                    e.ns_local = Some(ns.local.name.as_str().to_string());
+                }
+            }
+        }
+    }
+    // Canonical var + kind per source, in first-appearance order (deterministic
+    // var numbering). A namespace local wins the var; otherwise a generated name.
+    let mut import_kind: HashMap<String, ImportKind> = HashMap::new();
+    for source in &order {
+        let e = &agg[source];
+        let var = e
+            .ns_local
+            .clone()
+            .unwrap_or_else(|| unique_module_var(source, &mut used_names));
+        module_vars.insert(source.clone(), var);
+        let kind = if e.has_namespace || (e.has_default && e.has_named) {
+            ImportKind::Star
+        } else if e.has_default {
+            ImportKind::Default
+        } else {
+            ImportKind::Plain
+        };
+        import_kind.insert(source.clone(), kind);
+    }
+    // A replacement per named/default local → `<canonical var>.<member>`.
+    for stmt in &program.body {
+        let Statement::ImportDeclaration(import) = stmt else {
+            continue;
+        };
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        let ns_var = module_vars[import.source.value.as_str()].clone();
         for spec in specifiers {
             match spec {
                 ImportDeclarationSpecifier::ImportSpecifier(s) => {
@@ -196,7 +255,6 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
             }
         }
-        let _ = has_namespace;
     }
 
     // 2. Rewrite references to default/named import locals (symbol-aware) and
@@ -233,6 +291,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
                 rewrite_import(
                     &import,
                     &module_vars,
+                    &import_kind,
                     &mut needs,
                     &mut emitted_requires,
                     ast,
@@ -454,6 +513,7 @@ impl RefRewriter {
 fn rewrite_import<'a>(
     import: &oxc_ast::ast::ImportDeclaration<'a>,
     module_vars: &HashMap<String, String>,
+    import_kind: &HashMap<String, ImportKind>,
     needs: &mut HelperNeeds,
     emitted: &mut std::collections::HashSet<String>,
     ast: AstBuilder<'a>,
@@ -461,52 +521,36 @@ fn rewrite_import<'a>(
 ) {
     let source = import.source.value.as_str();
     let span = import.span;
-    let Some(specifiers) = &import.specifiers else {
+    if import.specifiers.is_none() {
         // side-effect import → `require("…");` (skip if already required).
         if emitted.insert(source.to_string()) {
             out.push(ast.statement_expression(span, require_call_at(source, span, ast)));
         }
         return;
-    };
+    }
     let ns_var = module_vars
         .get(source)
         .cloned()
         .unwrap_or_else(|| source.to_string());
-    // A default import via `import x from` OR `import { default as x }`.
-    let has_default = specifiers.iter().any(|s| match s {
-        ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => true,
-        ImportDeclarationSpecifier::ImportSpecifier(spec) => {
-            spec.imported.name().as_str() == "default"
-        }
-        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => false,
-    });
-    // A non-default named import (`import { foo }`).
-    let has_named = specifiers.iter().any(|s| match s {
-        ImportDeclarationSpecifier::ImportSpecifier(spec) => {
-            spec.imported.name().as_str() != "default"
-        }
-        _ => false,
-    });
-    let has_namespace = specifiers
-        .iter()
-        .any(|s| matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)));
-
     if !emitted.insert(source.to_string()) {
-        // Already required (e.g. also re-exported) — references use the same var.
+        // Already required (multiple import statements / also re-exported) — every
+        // binding for this source shares the one canonical var, so emit once.
         return;
     }
     let req = require_call_at(source, span, ast);
-    // Match tsc's esModuleInterop: namespace or mixed default+named → __importStar
-    // (the namespace is needed for both); default only → __importDefault; named
-    // only → plain require.
-    let init = if has_namespace || (has_default && has_named) {
-        needs.import_star = true;
-        call(ident("__importStar", ast), vec![req], ast)
-    } else if has_default {
-        needs.import_default = true;
-        call(ident("__importDefault", ast), vec![req], ast)
-    } else {
-        req
+    // The interop wrapper is decided per-source (across all its import statements),
+    // not per-statement — so a named + namespace import of the same module still
+    // gets `__importStar`. See `ImportKind`.
+    let init = match import_kind.get(source) {
+        Some(ImportKind::Star) => {
+            needs.import_star = true;
+            call(ident("__importStar", ast), vec![req], ast)
+        }
+        Some(ImportKind::Default) => {
+            needs.import_default = true;
+            call(ident("__importDefault", ast), vec![req], ast)
+        }
+        _ => req,
     };
     out.push(const_decl_at(&ns_var, init, span, ast));
 }
@@ -829,10 +873,15 @@ fn arrow_getter<'a>(value: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a
     ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, body)
 }
 
-/// `Object.defineProperty(exports, "<name>", { enumerable: true, get: () => <value> });`
+/// `Object.defineProperty(exports, "<name>", { enumerable: true, configurable: true, get: () => <value> });`
 ///
 /// Used for re-exports so they resolve lazily — required for circular module
 /// graphs (e.g. ngrx selector barrels), matching TypeScript's `export … from`.
+/// The descriptor is `configurable: true` (a deliberate deviation from tsc, which
+/// emits a non-configurable getter): an `import * as ns` of a barrel copies this
+/// descriptor onto the namespace member via `__importStar`/`__createBinding`, and
+/// `jest.spyOn(ns, name)` then needs to `Object.defineProperty` over it — which
+/// requires the member be configurable. Mirrors the R12 fix for `__createBinding`.
 fn define_export_getter<'a>(
     name: &str,
     value: Expression<'a>,
@@ -843,6 +892,15 @@ fn define_export_getter<'a>(
         SPAN,
         PropertyKind::Init,
         PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "enumerable")),
+        ast.expression_boolean_literal(SPAN, true),
+        false,
+        false,
+        false,
+    ));
+    props.push(ast.object_property_kind_object_property(
+        SPAN,
+        PropertyKind::Init,
+        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "configurable")),
         ast.expression_boolean_literal(SPAN, true),
         false,
         false,

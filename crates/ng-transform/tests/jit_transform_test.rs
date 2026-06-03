@@ -166,6 +166,33 @@ export class MyComponent {
 }
 
 #[test]
+fn required_signal_queries_are_registered() {
+    // R13: the `.required` member-call form of single-child queries
+    // (`viewChild.required(...)` / `contentChild.required(...)`) must get the SAME
+    // propDecorators entry as the bare form. Missing it meant Angular never
+    // registered the query → NG0951 / the signal stayed null. (Required-ness isn't
+    // in the args — Angular reads it off the runtime RequiredSignal.)
+    let code = ts(r#"import { Component, viewChild, contentChild } from '@angular/core';
+@Component({ template: '' })
+export class MyComponent {
+  reqView = viewChild.required('canvas');
+  reqContent = contentChild.required(Dir);
+  optView = viewChild('canvas');
+}
+"#);
+    assert!(
+        code.contains(r#"reqView: [{"#) && code.contains(r#"args: ["canvas", { isSignal: true }]"#),
+        "required viewChild gets a ViewChild propDecorators entry: {code}"
+    );
+    assert!(
+        code.contains("reqContent: [{") && code.contains("type: ContentChild"),
+        "required contentChild gets a ContentChild propDecorators entry: {code}"
+    );
+    // The non-required sibling still works.
+    assert!(code.contains("optView: [{"), "{code}");
+}
+
+#[test]
 fn signal_query_preserves_locator_and_options() {
     // Regression: the query predicate (class ref / string / forwardRef) and any
     // options must be preserved as decorator args — dropping the locator left

@@ -295,6 +295,42 @@ fn already_commonjs_module_is_not_re_marked() {
 }
 
 #[test]
+fn namespace_import_after_named_for_same_specifier_is_bound() {
+    // R14: when a named import precedes a namespace import for the SAME specifier,
+    // the namespace binding must still be materialized (it was previously folded
+    // away → `ns` left undeclared → ReferenceError at runtime). The two share one
+    // `__importStar` binding under the namespace var (matching tsc).
+    let code = cjs(concat!(
+        "import { foo } from './m';\n",
+        "import * as ns from './m';\n",
+        "export const a = foo;\n",
+        "export const b = () => ns.bar();\n",
+    ));
+    assert!(
+        code.contains(r#"const ns = __importStar(require("./m"))"#),
+        "namespace binding emitted: {code}"
+    );
+    // The named import now resolves through the same namespace var.
+    assert!(code.contains("ns.foo"), "named import uses the namespace var: {code}");
+    assert!(code.contains("ns.bar()"), "{code}");
+    // Exactly one require for the shared specifier.
+    assert_eq!(code.matches(r#"require("./m")"#).count(), 1, "{code}");
+}
+
+#[test]
+fn barrel_reexport_descriptor_is_configurable() {
+    // R17: `export { x } from '...'` re-export getters must be `configurable: true`
+    // so an `import * as ns` of the barrel yields a namespace member jest.spyOn can
+    // redefine (extends the R12 fix to the re-export path).
+    let code = cjs("export { foo } from './m';\n");
+    assert!(
+        code.contains(r#"Object.defineProperty(exports, "foo""#),
+        "{code}"
+    );
+    assert!(code.contains("configurable: true"), "re-export getter is configurable: {code}");
+}
+
+#[test]
 fn real_esm_module_still_gets_the_marker() {
     // Guard the other side of the R5 gate: a genuine ES module is still marked.
     let code = cjs("export const x = 1;\n");
