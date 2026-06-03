@@ -195,21 +195,34 @@ export function createTransformer(
   // literal (unexpanded) path, find nothing, and derive NO options — silently
   // dropping `target` (so oxc defaults to esnext: `async` stays native, etc.),
   // `module`, and the decorator flags. Resolve lazily and memoize.
-  let resolved:
-    | { derived: DerivedTransformOptions; moduleKind: 'commonjs' | 'esm'; esmOutput: boolean }
-    | undefined;
-  const resolve = (config?: { rootDir?: string; cwd?: string }) => {
-    if (resolved) return resolved;
+  // Memoized per (expanded tsconfig path + rootDir/cwd), NOT once for the instance:
+  // jest creates one transformer per project today (so a single entry), but keying on
+  // the resolved config means a future shared/multi-rootDir instance can't silently
+  // serve the first file's derived options to a different project.
+  type Resolved = {
+    derived: DerivedTransformOptions;
+    moduleKind: 'commonjs' | 'esm';
+    esmOutput: boolean;
+  };
+  const resolvedByKey = new Map<string, Resolved>();
+  const resolve = (config?: { rootDir?: string; cwd?: string }): Resolved => {
+    const rootDir = config?.rootDir;
+    const base = rootDir ?? config?.cwd;
+    const tsconfigPath = transformerOptions.tsconfig
+      ? expandRootDir(transformerOptions.tsconfig, rootDir)
+      : '';
+    const key = `${tsconfigPath}\0${base ?? ''}`;
+    const cached = resolvedByKey.get(key);
+    if (cached) return cached;
     let derived: DerivedTransformOptions = {};
     if (transformerOptions.tsconfig) {
-      const rootDir = config?.rootDir;
-      const tsconfigPath = expandRootDir(transformerOptions.tsconfig, rootDir);
-      derived = deriveTransformOptions(tsconfigPath, rootDir ?? config?.cwd);
+      derived = deriveTransformOptions(tsconfigPath, base);
     }
     const moduleKind = transformerOptions.module ?? derived.module ?? 'commonjs';
     // ESM output controls the stringified content module form (export vs module.exports).
-    resolved = { derived, moduleKind, esmOutput: moduleKind === 'esm' };
-    return resolved;
+    const result: Resolved = { derived, moduleKind, esmOutput: moduleKind === 'esm' };
+    resolvedByKey.set(key, result);
+    return result;
   };
 
   return {
