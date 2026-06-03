@@ -172,14 +172,16 @@ fn required_signal_queries_are_registered() {
     // propDecorators entry as the bare form. Missing it meant Angular never
     // registered the query → NG0951 / the signal stayed null. (Required-ness isn't
     // in the args — Angular reads it off the runtime RequiredSignal.)
-    let code = ts(r#"import { Component, viewChild, contentChild } from '@angular/core';
+    let code = ts(
+        r#"import { Component, viewChild, contentChild } from '@angular/core';
 @Component({ template: '' })
 export class MyComponent {
   reqView = viewChild.required('canvas');
   reqContent = contentChild.required(Dir);
   optView = viewChild('canvas');
 }
-"#);
+"#,
+    );
     assert!(
         code.contains(r#"reqView: [{"#) && code.contains(r#"args: ["canvas", { isSignal: true }]"#),
         "required viewChild gets a ViewChild propDecorators entry: {code}"

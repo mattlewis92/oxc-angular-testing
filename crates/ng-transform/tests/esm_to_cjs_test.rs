@@ -311,7 +311,10 @@ fn namespace_import_after_named_for_same_specifier_is_bound() {
         "namespace binding emitted: {code}"
     );
     // The named import now resolves through the same namespace var.
-    assert!(code.contains("ns.foo"), "named import uses the namespace var: {code}");
+    assert!(
+        code.contains("ns.foo"),
+        "named import uses the namespace var: {code}"
+    );
     assert!(code.contains("ns.bar()"), "{code}");
     // Exactly one require for the shared specifier.
     assert_eq!(code.matches(r#"require("./m")"#).count(), 1, "{code}");
@@ -327,7 +330,10 @@ fn barrel_reexport_descriptor_is_configurable() {
         code.contains(r#"Object.defineProperty(exports, "foo""#),
         "{code}"
     );
-    assert!(code.contains("configurable: true"), "re-export getter is configurable: {code}");
+    assert!(
+        code.contains("configurable: true"),
+        "re-export getter is configurable: {code}"
+    );
 }
 
 #[test]
