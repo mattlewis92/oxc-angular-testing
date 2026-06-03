@@ -32,10 +32,11 @@ use oxc_allocator::CloneIn;
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, CallExpression, Class, ClassElement, Declaration, Decorator,
-    Expression, FormalParameter, FormalParameterKind, ImportDeclarationSpecifier,
-    ImportOrExportKind, MethodDefinitionKind, ObjectPropertyKind, Program, PropertyDefinitionType,
-    PropertyKey, PropertyKind, Statement, TSType, TSTypeName, WithClause,
+    Argument, ArrayExpressionElement, BindingPattern, CallExpression, Class, ClassElement,
+    Declaration, Decorator, Expression, FormalParameter, FormalParameterKind,
+    ImportDeclarationSpecifier, ImportOrExportKind, MethodDefinitionKind, ObjectPropertyKind,
+    Program, PropertyDefinitionType, PropertyKey, PropertyKind, Statement, TSType, TSTypeName,
+    VariableDeclaration, WithClause,
 };
 use oxc_span::SPAN;
 use oxc_traverse::{Traverse, TraverseCtx};
@@ -357,6 +358,16 @@ fn collect_value_names(stmt: &Statement<'_>, out: &mut HashSet<String>) {
         Statement::TSEnumDeclaration(e) => {
             out.insert(e.id.name.as_str().to_string());
         }
+        // A `function f(){}` binds `f` as a runtime value; a constructor param
+        // typed `: f` would be a value ref (tsc emits the name, not Object).
+        Statement::FunctionDeclaration(f) => {
+            if let Some(id) = &f.id {
+                out.insert(id.name.as_str().to_string());
+            }
+        }
+        // `const Svc = class {}` / `const X = …` bind runtime values; a param typed
+        // `: Svc` resolves to a value, so tsc emits `Svc` rather than `Object`.
+        Statement::VariableDeclaration(v) => collect_var_names(v, out),
         Statement::ExportNamedDeclaration(e) => match &e.declaration {
             Some(Declaration::ClassDeclaration(c)) => {
                 if let Some(id) = &c.id {
@@ -366,9 +377,26 @@ fn collect_value_names(stmt: &Statement<'_>, out: &mut HashSet<String>) {
             Some(Declaration::TSEnumDeclaration(en)) => {
                 out.insert(en.id.name.as_str().to_string());
             }
+            Some(Declaration::FunctionDeclaration(f)) => {
+                if let Some(id) = &f.id {
+                    out.insert(id.name.as_str().to_string());
+                }
+            }
+            Some(Declaration::VariableDeclaration(v)) => collect_var_names(v, out),
             _ => {}
         },
         _ => {}
+    }
+}
+
+/// Insert each plain `BindingIdentifier` bound by a `VariableDeclaration` (e.g.
+/// `const Svc = class {}`). Destructuring patterns are skipped — a destructured
+/// binding is implausible as a constructor-parameter type annotation.
+fn collect_var_names(v: &VariableDeclaration<'_>, out: &mut HashSet<String>) {
+    for d in &v.declarations {
+        if let BindingPattern::BindingIdentifier(id) = &d.id {
+            out.insert(id.name.as_str().to_string());
+        }
     }
 }
 

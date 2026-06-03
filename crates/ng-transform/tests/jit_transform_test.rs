@@ -55,6 +55,25 @@ export class MyDir {
 }
 
 #[test]
+fn const_bound_class_param_type_emits_the_name_not_object() {
+    // `const Svc = class {}` binds a runtime value; a constructor param typed `: Svc`
+    // must emit `type: Svc` (DI-by-type) — not the `Object` fallback, which would
+    // make Angular's by-type injection fail with NullInjectorError. tsc emits `Svc`.
+    let code = ts(r#"import { Injectable } from '@angular/core';
+const Svc = class {};
+@Injectable()
+export class C {
+  constructor(s: Svc) {}
+}
+"#);
+    assert!(
+        code.contains("type: Svc"),
+        "const-bound class must be a value ref, not Object: {code}"
+    );
+    assert!(!code.contains("type: Object"), "{code}");
+}
+
+#[test]
 fn type_only_param_types_emit_object_not_dangling_reference() {
     // Regression: utility types (`Pick`), structural types (`ReadonlyArray`) and
     // `import type` symbols have no runtime value — emitting them as the param
