@@ -138,19 +138,25 @@ export interface JestSyncTransformer {
 
 /**
  * Decide whether a file is an ESM dependency that should be downleveled to the
- * runner's module format with the Angular/TS passes skipped — i.e. a `.mjs`
- * file or anything under `node_modules` (e.g. `@angular/core`, which ships only
- * ESM and must be converted to CommonJS for classic CJS jest). Additional regex
- * sources can be supplied via `processEsmModules`.
+ * runner's module format with the Angular/TS passes skipped — i.e. a `.mjs` file,
+ * or a `.js` file under `node_modules` (e.g. `@angular/core`, which ships only ESM
+ * and must be converted to CommonJS for classic CJS jest). Additional regex sources
+ * can be supplied via `processEsmModules`.
  *
- * Mirrors jest-preset-angular's `processWithEsbuild` fast path, but uses our own
- * oxc ESM→CJS transform instead of esbuild.
+ * Mirrors jest-preset-angular's `processWithEsbuild` fast path (jest-preset-angular
+ * 16: `**​/*.mjs` globs, plus `filePath.includes('node_modules') && endsWith('.js')`),
+ * but uses our own oxc ESM→CJS transform instead of esbuild. The `node_modules`
+ * substring is intentionally unanchored, matching jest-preset-angular (also covers
+ * Windows `\node_modules\` and pnpm/Yarn-PnP layouts).
  */
 export function isEsmDependency(
   sourcePath: string,
   processEsmModules?: string[],
 ): boolean {
-  if (sourcePath.endsWith('.mjs') || sourcePath.includes('/node_modules/')) {
+  if (
+    sourcePath.endsWith('.mjs') ||
+    (sourcePath.includes('node_modules') && sourcePath.endsWith('.js'))
+  ) {
     return true;
   }
   if (Array.isArray(processEsmModules)) {
