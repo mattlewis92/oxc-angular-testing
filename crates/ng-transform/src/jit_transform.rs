@@ -140,6 +140,21 @@ fn key_name<'a>(key: &PropertyKey<'a>) -> Option<String> {
     }
 }
 
+/// The underlying initializer `CallExpression` of a class-field value, seeing
+/// through a coverage-inserted counter wrapper. Source-level coverage rewrites
+/// `foo = input(...)` to `foo = (++cov.s[N], input(...))` (a `SequenceExpression`
+/// whose last element is the real initializer) and may parenthesize it; the
+/// signal-API detector must look through both, else instrumented component files
+/// lose their synthesized signal `propDecorators`.
+fn initializer_call<'a, 'b>(value: &'b Expression<'a>) -> Option<&'b CallExpression<'a>> {
+    match value {
+        Expression::CallExpression(call) => Some(call),
+        Expression::SequenceExpression(seq) => seq.expressions.last().and_then(initializer_call),
+        Expression::ParenthesizedExpression(p) => initializer_call(&p.expression),
+        _ => None,
+    }
+}
+
 fn ident<'a>(name: &str, ast: AstBuilder<'a>) -> Expression<'a> {
     ast.expression_identifier(SPAN, ast.allocator.alloc_str(name))
 }
@@ -538,7 +553,17 @@ impl JitTransform {
             let Some(name) = key_name(&p.key) else {
                 continue;
             };
-            let Some(Expression::CallExpression(call)) = &p.value else {
+            let Some(value) = &p.value else {
+                continue;
+            };
+            // See through a coverage counter wrapper. Coverage instrumentation runs
+            // first (on the source AST) and rewrites `foo = input(...)` to
+            // `foo = (++cov.s[N], input(...))` — a sequence whose last element is the
+            // real initializer. Signal-API detection must look through it, else an
+            // instrumented component file (every file matched by `collectCoverageFrom`)
+            // loses its synthesized signal-input/query `propDecorators` → `ɵcmp.inputs`
+            // ends up empty (setInput no-ops, `input.required()` throws NG0950).
+            let Some(call) = initializer_call(value) else {
                 continue;
             };
             let Some(init) = self.classify_initializer(call) else {

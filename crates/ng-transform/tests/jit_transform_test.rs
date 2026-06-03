@@ -166,6 +166,41 @@ export class MyComponent {
 }
 
 #[test]
+fn signal_inputs_survive_coverage_instrumentation() {
+    // R13: source-level coverage runs first and wraps the field initializer as
+    // `foo = (++cov.s[N], input(...))`. The signal-API detector must see through
+    // that counter sequence — otherwise an instrumented component file (every file
+    // matched by `collectCoverageFrom`) loses its synthesized signal `propDecorators`
+    // → empty `ɵcmp.inputs` → `setInput` no-ops / `input.required()` throws NG0950.
+    let opts = TransformOptions {
+        coverage: true,
+        target: "es2016".to_string(),
+        ..TransformOptions::default()
+    };
+    let out = transform(
+        "import { Component, input, model } from '@angular/core';\n\
+@Component({ selector: 'x', template: '' })\n\
+export class C {\n  foo = input('i');\n  bar = input.required();\n  baz = model(false);\n}\n",
+        "c.ts",
+        &opts,
+    );
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    let code = out.code;
+    // Coverage actually ran (counters present)...
+    assert!(code.contains(".s["), "coverage instrumented: {code}");
+    // ...and the signal inputs are still registered.
+    assert!(
+        code.contains("propDecorators"),
+        "propDecorators dropped under coverage: {code}"
+    );
+    assert!(
+        code.contains("foo: [{") && code.contains("bar: [{") && code.contains("baz: [{"),
+        "all three signal members synthesized under coverage: {code}"
+    );
+    assert!(code.contains("isSignal: true"), "{code}");
+}
+
+#[test]
 fn required_signal_queries_are_registered() {
     // R13: the `.required` member-call form of single-child queries
     // (`viewChild.required(...)` / `contentChild.required(...)`) must get the SAME
