@@ -33,6 +33,9 @@ pub struct ResourceTransform {
     use_import: bool,
     /// Local identifier names that refer to `Component` from `@angular/core`.
     component_locals: HashSet<String>,
+    /// Local names of `import * as ng from '@angular/core'` namespace imports, so
+    /// `@ng.Component({ templateUrl })` is recognized too (parity with jit_transform).
+    component_namespaces: HashSet<String>,
     /// `import` mode: collected `(local_var, normalized_source)` to hoist.
     pending_imports: Vec<(String, String)>,
     /// Counter for `__NG_CLI_RESOURCE__N` names.
@@ -47,6 +50,7 @@ impl ResourceTransform {
         Self {
             use_import,
             component_locals: HashSet::new(),
+            component_namespaces: HashSet::new(),
             pending_imports: Vec::new(),
             counter: 0,
             changed: false,
@@ -155,24 +159,32 @@ impl<'a> Traverse<'a, ()> for ResourceTransform {
                 continue;
             };
             for spec in specifiers {
-                let ImportDeclarationSpecifier::ImportSpecifier(s) = spec else {
-                    continue;
-                };
-                if s.imported.name().as_str() == "Component" {
-                    self.component_locals
-                        .insert(s.local.name.as_str().to_string());
+                match spec {
+                    ImportDeclarationSpecifier::ImportSpecifier(s)
+                        if s.imported.name().as_str() == "Component" =>
+                    {
+                        self.component_locals
+                            .insert(s.local.name.as_str().to_string());
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                        self.component_namespaces
+                            .insert(s.local.name.as_str().to_string());
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
     fn enter_class(&mut self, node: &mut Class<'a>, ctx: &mut TraverseCtx<'a, ()>) {
-        if self.component_locals.is_empty() {
+        if self.component_locals.is_empty() && self.component_namespaces.is_empty() {
             return;
         }
         let ast = ctx.ast;
         for dec in &mut node.decorators {
-            if let Some(obj) = component_metadata(dec, &self.component_locals) {
+            if let Some(obj) =
+                component_metadata(dec, &self.component_locals, &self.component_namespaces)
+            {
                 self.process_metadata(obj, ast);
             }
         }
@@ -211,14 +223,24 @@ impl<'a> Traverse<'a, ()> for ResourceTransform {
 fn component_metadata<'b, 'a>(
     dec: &'b mut Decorator<'a>,
     component_locals: &HashSet<String>,
+    component_namespaces: &HashSet<String>,
 ) -> Option<&'b mut ObjectExpression<'a>> {
     let Expression::CallExpression(call) = &mut dec.expression else {
         return None;
     };
-    let is_component = matches!(
-        &call.callee,
-        Expression::Identifier(id) if component_locals.contains(id.name.as_str())
-    );
+    let is_component = match &call.callee {
+        // `@Component(...)` — a named/aliased local.
+        Expression::Identifier(id) => component_locals.contains(id.name.as_str()),
+        // `@ng.Component(...)` — a namespace-qualified member.
+        Expression::StaticMemberExpression(m) => {
+            m.property.name.as_str() == "Component"
+                && matches!(
+                    &m.object,
+                    Expression::Identifier(obj) if component_namespaces.contains(obj.name.as_str())
+                )
+        }
+        _ => false,
+    };
     if !is_component {
         return None;
     }

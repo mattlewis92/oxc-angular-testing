@@ -96,3 +96,25 @@ export class FooComponent {}
     assert!(!code.contains("styleUrl"), "{code}");
     assert!(code.contains("template: require(\"./foo.html\")"), "{code}");
 }
+
+#[test]
+fn namespace_component_inlines_template_and_strips_styles() {
+    // `import * as ng` + `@ng.Component({ templateUrl })`: resources.rs must inline
+    // the templateUrl for the namespace form too (parity with jit_transform), not
+    // leave it for a runtime fetch.
+    let src = r#"import * as ng from '@angular/core';
+@ng.Component({
+  selector: 'app-foo',
+  templateUrl: './foo.component.html',
+  styleUrls: ['./foo.component.css'],
+})
+export class FooComponent {}
+"#;
+    let code = run(src, ModuleKind::CommonJs);
+    assert!(
+        code.contains("template: require(\"./foo.component.html\")"),
+        "namespace @ng.Component templateUrl not inlined: {code}"
+    );
+    assert!(!code.contains("templateUrl"), "{code}");
+    assert!(!code.contains("styleUrls"), "{code}");
+}
