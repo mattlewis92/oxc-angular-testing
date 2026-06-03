@@ -50,6 +50,12 @@ impl DelegateCtorTransform {
     }
 }
 
+impl Default for DelegateCtorTransform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> Traverse<'a, ()> for DelegateCtorTransform {
     fn enter_class(&mut self, class: &mut Class<'a>, ctx: &mut TraverseCtx<'a, ()>) {
         // Only derived classes synthesize a delegating constructor.
