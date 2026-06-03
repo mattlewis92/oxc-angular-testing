@@ -17,6 +17,7 @@
 //! dynamic-import wrapper). The inserted counters ride through the transforms;
 //! the preamble is prepended at the single codegen.
 
+mod delegate_ctor;
 mod esm_to_cjs;
 mod jest_hoist;
 mod jit_transform;
@@ -39,6 +40,7 @@ use oxc_transformer::{
 };
 use oxc_traverse::traverse_mut;
 
+use delegate_ctor::DelegateCtorTransform;
 use jest_hoist::JestHoist;
 use jit_transform::JitTransform;
 use resources::ResourceTransform;
@@ -192,6 +194,20 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         let ret = Transformer::new(&allocator, Path::new(filename), &oxc_options)
             .build_with_scoping(scoping, &mut program);
         errors.extend(ret.errors.iter().map(ToString::to_string));
+
+        // oxc synthesizes a derived class's field-init constructor as
+        // `constructor(..._args) { super(..._args); /*fields*/ }`. Angular JIT's
+        // `isDelegateCtor` regex only inherits the parent's DI params when the
+        // ctor is empty + delegates via `super(...arguments)` (the tsc shape),
+        // so rewrite that synthesized form to match.
+        {
+            let scoping = SemanticBuilder::new()
+                .build(&program)
+                .semantic
+                .into_scoping();
+            let mut delegate = DelegateCtorTransform::new();
+            traverse_mut(&mut delegate, &allocator, &mut program, scoping, ());
+        }
 
         // CJS mode: rewrite ESM import/export to CommonJS, matching TypeScript's
         // `esModuleInterop` emit. Returns the interop helper prelude text.
