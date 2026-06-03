@@ -54,7 +54,13 @@ pub struct TransformResult {
     pub source_map: Option<String>,
     /// Istanbul `FileCoverage` JSON, when [`TransformOptions::coverage`] is set.
     pub coverage_map: Option<String>,
-    /// Non-fatal diagnostics (parse/transform errors rendered as strings).
+    /// Diagnostics (parse/transform errors, an unknown ES target, …) rendered as
+    /// strings. **Callers MUST inspect this.** `transform` never hard-fails — it
+    /// always returns whatever `code` it produced, even when `errors` is non-empty
+    /// (the output may then be incomplete or wrong). A caller that ignores `errors`
+    /// can silently ship miscompiled code. Both bundled plugins fail the run when it
+    /// is non-empty (jest throws, vitest calls `this.error`); any other caller must
+    /// do the same.
     pub errors: Vec<String>,
 }
 
@@ -62,6 +68,13 @@ pub struct TransformResult {
 ///
 /// `filename` drives the [`SourceType`] (ts/tsx/js/jsx) and is used as the
 /// source-map / coverage path.
+///
+/// # Errors
+///
+/// Errors are not returned via `Result` — they are accumulated into
+/// [`TransformResult::errors`], which the caller **must** inspect (see that field).
+/// `transform` always returns a [`TransformResult`]; a non-empty `errors` means the
+/// returned `code` may be incomplete or incorrect.
 #[must_use]
 pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> TransformResult {
     let allocator = Allocator::default();
