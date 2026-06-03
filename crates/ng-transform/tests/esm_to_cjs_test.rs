@@ -345,3 +345,63 @@ fn real_esm_module_still_gets_the_marker() {
         "{code}"
     );
 }
+
+// --- R15: live bindings for exported mutable (`let`/`var`) bindings ----------
+
+#[test]
+fn exported_let_write_updates_exports_live_binding() {
+    // A later write to `link` must also update `exports.link` so importers see
+    // the new value (tsc routes the write through `exports`). We keep the local
+    // `let link` as the read source-of-truth and mirror: `exports.link = link = v`.
+    let code = cjs("export let link;\nexport function setLink(v) { link = v; }\n");
+    assert!(code.contains("exports.link = link = v"), "{code}");
+}
+
+#[test]
+fn exported_let_shadowing_local_is_not_rewritten() {
+    // An inner binding (here a param) that shadows the exported name has its own
+    // SymbolId, so its write must NOT touch `exports.link`.
+    let code =
+        cjs("export let link = 1;\nexport function shadow(link) { link = 99; return link; }\n");
+    assert!(
+        !code.contains("exports.link = link = 99"),
+        "shadowed write leaked to exports: {code}"
+    );
+}
+
+#[test]
+fn exported_const_is_not_rewritten() {
+    // `const` can't be reassigned; tsc keeps `const k = …; exports.k = k;` and
+    // never wraps writes (there are none). No `exports.k = k = …` should appear.
+    let code = cjs("export const k = 1;\nexport function f() { return k; }\n");
+    assert!(!code.contains("exports.k = k ="), "{code}");
+    assert!(code.contains("exports.k = k;"), "{code}");
+}
+
+#[test]
+fn exported_let_compound_and_update_assignments() {
+    // Compound `+=` and prefix/postfix `++` must all mirror into `exports`.
+    let code = cjs(
+        "export let count = 0;\nexport function add(n) { count += n; }\nexport function inc() { return ++count; }\nexport function post() { return count++; }\n",
+    );
+    assert!(code.contains("exports.count = count += n"), "{code}");
+    assert!(code.contains("exports.count = ++count"), "{code}");
+    // postfix: yields the old value while exports/local get the new one.
+    assert!(code.contains("(exports.count = ++count) - 1"), "{code}");
+}
+
+#[test]
+fn export_specifier_of_local_let_is_live() {
+    // `export { a }` where `a` is a module-scope `let` — writes to `a` mirror to
+    // `exports.a` (here the exported name equals the local name).
+    let code = cjs("let a = 0;\nexport { a };\nexport function set(v) { a = v; }\n");
+    assert!(code.contains("exports.a = a = v"), "{code}");
+}
+
+#[test]
+fn export_specifier_alias_of_local_let_is_live() {
+    // `export { a as b }` — the write to local `a` must mirror to the EXPORTED
+    // name `exports.b`, not `exports.a`.
+    let code = cjs("let a = 0;\nexport { a as b };\nexport function set(v) { a = v; }\n");
+    assert!(code.contains("exports.b = a = v"), "{code}");
+}

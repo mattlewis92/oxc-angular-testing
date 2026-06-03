@@ -24,9 +24,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, BindingPattern, Expression, FormalParameterKind,
-    ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind, Statement,
-    VariableDeclarationKind,
+    Argument, AssignmentOperator, AssignmentTarget, BindingPattern, Expression,
+    FormalParameterKind, ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind,
+    SimpleAssignmentTarget, Statement, UpdateOperator, VariableDeclarationKind,
 };
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SPAN};
@@ -266,9 +266,11 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
             .semantic
             .into_scoping();
         let symbol_map = build_symbol_map(program, &scoping, &replacements);
+        let live_bindings = build_live_binding_map(program, &scoping);
         let mut rewriter = RefRewriter {
             symbol_map,
             replacements: replacements.clone(),
+            live_bindings,
             import_star_used: false,
         };
         traverse_mut(&mut rewriter, allocator, program, scoping, ());
@@ -428,9 +430,108 @@ fn build_symbol_map<'a>(
     map
 }
 
+/// Map each module-scope mutable exported binding's `SymbolId` to its exported
+/// name. These are the "live bindings" tsc keeps in sync: every write to such a
+/// binding must also update `exports.<name>` so importers observe the new value.
+///
+/// Two sources of entries (both restricted to module-scope `let`/`var` — `const`
+/// can't be reassigned, and function/class declarations are not live-bound by
+/// tsc):
+/// - `export let x` / `export var x` (directly exported) → x's symbol → "x".
+/// - `export { local as ll }` where `local` is a module-scope `let`/`var` (NOT an
+///   import) → local's symbol → "ll".
+fn build_live_binding_map<'a>(
+    program: &Program<'a>,
+    scoping: &Scoping,
+) -> HashMap<SymbolId, String> {
+    // First collect every module-scope `let`/`var` binding name → SymbolId, so
+    // the `export { … }` (alias) branch can resolve a local name to its symbol.
+    let mut module_let_var: HashMap<&str, SymbolId> = HashMap::new();
+    for stmt in &program.body {
+        let decl = match stmt {
+            Statement::VariableDeclaration(v) => Some(&**v),
+            Statement::ExportNamedDeclaration(e) => match &e.declaration {
+                Some(oxc_ast::ast::Declaration::VariableDeclaration(v)) => Some(&**v),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(v) = decl else { continue };
+        if v.kind == VariableDeclarationKind::Const {
+            continue;
+        }
+        for d in &v.declarations {
+            collect_pattern_symbols(&d.id, &mut module_let_var);
+        }
+    }
+
+    let mut map: HashMap<SymbolId, String> = HashMap::new();
+    for stmt in &program.body {
+        let Statement::ExportNamedDeclaration(export) = stmt else {
+            continue;
+        };
+        // `export let/var x` — directly exported, name == binding name.
+        if let Some(oxc_ast::ast::Declaration::VariableDeclaration(v)) = &export.declaration {
+            if v.kind != VariableDeclarationKind::Const {
+                let mut binders: HashMap<&str, SymbolId> = HashMap::new();
+                for d in &v.declarations {
+                    collect_pattern_symbols(&d.id, &mut binders);
+                }
+                for (name, sym) in binders {
+                    map.insert(sym, name.to_string());
+                }
+            }
+            continue;
+        }
+        // `export { local as ll }` with no source — alias of a local `let`/`var`.
+        if export.source.is_none() {
+            for spec in &export.specifiers {
+                let local = spec.local.name();
+                if let Some(&sym) = module_let_var.get(local.as_str()) {
+                    map.insert(sym, spec.exported.name().as_str().to_string());
+                }
+            }
+        }
+    }
+    let _ = scoping; // SymbolIds are read off binding identifiers directly.
+    map
+}
+
+/// Collect every bound identifier in a binding pattern → its `SymbolId`,
+/// recursing through destructuring, defaults, and rest.
+fn collect_pattern_symbols<'a>(pattern: &BindingPattern<'a>, out: &mut HashMap<&'a str, SymbolId>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            if let Some(sym) = id.symbol_id.get() {
+                out.insert(id.name.as_str(), sym);
+            }
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_pattern_symbols(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_pattern_symbols(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_pattern_symbols(elem, out);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_pattern_symbols(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => collect_pattern_symbols(&assign.left, out),
+    }
+}
+
 struct RefRewriter {
     symbol_map: HashMap<SymbolId, Replacement>,
     replacements: HashMap<String, Replacement>,
+    /// Module-scope mutable exported bindings (`SymbolId` → exported name). Writes
+    /// to these are mirrored into `exports.<name>` so importers see live values.
+    live_bindings: HashMap<SymbolId, String>,
     /// Set when a dynamic `import()` was rewritten (→ the `__importStar` helper
     /// is needed).
     import_star_used: bool,
@@ -449,6 +550,48 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
             let source = std::mem::replace(&mut imp.source, ast.expression_null_literal(span));
             *expr = dynamic_require(source, span, ast);
             self.import_star_used = true;
+            return;
+        }
+
+        // Mirror a write to a live exported binding into `exports.<name>`. Done on
+        // *exit* so we wrap the already-traversed expression and don't re-descend
+        // into the synthesized wrapper (which would recurse forever). The local
+        // `let`/`var` is kept as the read source-of-truth; we add `exports.x = …`
+        // alongside every write so importers observe the new value.
+        match expr {
+            // `x = v`, `x += v`, `x **= v`, … → `exports.x = (x <op>= v)`.
+            // Only a bare-identifier LHS; destructuring leaves are handled in the
+            // assignment-target hooks below.
+            Expression::AssignmentExpression(assign) => {
+                let AssignmentTarget::AssignmentTargetIdentifier(id) = &assign.left else {
+                    return;
+                };
+                let Some(name) = self.live_binding_name(id.reference_id.get(), ctx) else {
+                    return;
+                };
+                let name = name.to_string();
+                let inner = std::mem::replace(expr, ctx.ast.expression_null_literal(SPAN));
+                *expr = export_write_wrap(&name, inner, ctx.ast);
+            }
+            // `x++` / `++x` / `x--` / `--x` → preserve value semantics:
+            //   `++x` (prefix)  → `exports.x = ++x`
+            //   `x++` (postfix) → `(exports.x = ++x) - 1` (`+ 1` for `--`)
+            Expression::UpdateExpression(update) => {
+                let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &update.argument
+                else {
+                    return;
+                };
+                let Some(name) = self.live_binding_name(id.reference_id.get(), ctx) else {
+                    return;
+                };
+                let name = name.to_string();
+                let was_prefix = update.prefix;
+                let op = update.operator;
+                update.prefix = true;
+                let inner = std::mem::replace(expr, ctx.ast.expression_null_literal(SPAN));
+                *expr = export_update_wrap(&name, inner, was_prefix, op, ctx.ast);
+            }
+            _ => {}
         }
     }
 
@@ -482,6 +625,20 @@ impl RefRewriter {
         let rid = reference_id?;
         let symbol_id = ctx.scoping().get_reference(rid).symbol_id()?;
         self.symbol_map.get(&symbol_id).cloned()
+    }
+
+    /// Resolve a reference to its binding `SymbolId` and, if that binding is a
+    /// live exported mutable binding, return its exported name. Scope-aware: an
+    /// inner shadow of the same name resolves to a different `SymbolId` and is not
+    /// rewritten.
+    fn live_binding_name(
+        &self,
+        reference_id: Option<oxc_syntax::reference::ReferenceId>,
+        ctx: &TraverseCtx<'_, ()>,
+    ) -> Option<&str> {
+        let rid = reference_id?;
+        let symbol_id = ctx.scoping().get_reference(rid).symbol_id()?;
+        self.live_bindings.get(&symbol_id).map(String::as_str)
     }
 
     fn callee_replacement(
@@ -857,6 +1014,52 @@ fn assign_export_stmt<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>
         value,
     );
     ast.statement_expression(SPAN, assign)
+}
+
+/// Wrap a write to a live exported binding: `<inner>` → `exports.<name> = (<inner>)`.
+/// `<inner>` is the original (already-traversed) assignment expression, so its LHS
+/// still updates the module-local `let`/`var` (the read source-of-truth) while the
+/// result is mirrored into `exports.<name>`.
+fn export_write_wrap<'a>(name: &str, inner: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
+    let target = ast.member_expression_static(
+        SPAN,
+        ident("exports", ast),
+        ast.identifier_name(SPAN, ast.allocator.alloc_str(name)),
+        false,
+    );
+    ast.expression_assignment(
+        SPAN,
+        AssignmentOperator::Assign,
+        AssignmentTarget::from(target),
+        inner,
+    )
+}
+
+/// Wrap an update to a live exported binding, preserving prefix/postfix value
+/// semantics. The update has already been normalized to *prefix* (`++x`/`--x`):
+///   - source prefix  → `exports.x = ++x` (value is the new value, correct)
+///   - source postfix → `(exports.x = ++x) - 1` for `++` (`+ 1` for `--`), so the
+///     overall expression still yields the OLD value while `exports.x` and the
+///     local both hold the new value.
+fn export_update_wrap<'a>(
+    name: &str,
+    inner: Expression<'a>,
+    was_prefix: bool,
+    op: UpdateOperator,
+    ast: AstBuilder<'a>,
+) -> Expression<'a> {
+    let wrapped = export_write_wrap(name, inner, ast);
+    if was_prefix {
+        return wrapped;
+    }
+    // Postfix: compensate by the opposite of the applied delta.
+    let (compensate_op, _) = match op {
+        UpdateOperator::Increment => (oxc_ast::ast::BinaryOperator::Subtraction, 1.0),
+        UpdateOperator::Decrement => (oxc_ast::ast::BinaryOperator::Addition, 1.0),
+    };
+    let one =
+        ast.expression_numeric_literal(SPAN, 1.0, None, oxc_syntax::number::NumberBase::Decimal);
+    ast.expression_binary(SPAN, wrapped, compensate_op, one)
 }
 
 /// `() => <value>` arrow (used as a re-export getter body).
