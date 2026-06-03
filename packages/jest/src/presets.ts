@@ -20,6 +20,11 @@ export interface JestPresetConfig {
  * Classic CommonJS jest. TypeScript and ESM-only `.mjs` / `node_modules`
  * dependencies (e.g. `@angular/core`) are downleveled to CommonJS. Run *without*
  * `--experimental-vm-modules` so jest loads the transformed `.mjs` as CommonJS.
+ *
+ * The returned config is a starting point. `transformIgnorePatterns` only un-ignores
+ * the deps jest-preset-angular does by default (`.mjs` + `@angular/common/locales/*.js`);
+ * if you depend on an ESM-authored `.js` package in `node_modules`, extend
+ * `transformIgnorePatterns` (and, if needed, the `transform` map) yourself.
  */
 export function createCjsPreset(
   transformerOptions: OxcAngularJestOptions = {},
@@ -32,8 +37,11 @@ export function createCjsPreset(
       // (via stringifyContentPathRegex), the rest compiled (incl. React .tsx/.jsx).
       '^.+\\.(ts|tsx|js|jsx|mjs|html|svg)$': [TRANSFORMER, opts],
     },
-    // Transform `.mjs` files in node_modules (e.g. @angular/*), ignore the rest.
-    transformIgnorePatterns: ['node_modules/(?!.*\\.mjs$)'],
+    // Transform node_modules `.mjs` (e.g. @angular/*) + @angular/common locale `.js`,
+    // ignore the rest — matching jest-preset-angular's default un-ignore set.
+    transformIgnorePatterns: [
+      'node_modules/(?!(.*\\.mjs$|@angular/common/locales/.*\\.js$))',
+    ],
     testEnvironment: 'node',
   };
 }
@@ -41,6 +49,10 @@ export function createCjsPreset(
 /**
  * Native-ESM jest (run with `NODE_OPTIONS=--experimental-vm-modules`).
  * TypeScript is emitted as ESM; `.mjs` / `node_modules` are loaded natively.
+ *
+ * As with the CJS preset, `transformIgnorePatterns` only un-ignores `tslib` by
+ * default (matching jest-preset-angular); extend it for other node_modules deps that
+ * need transforming.
  */
 export function createEsmPreset(
   transformerOptions: OxcAngularJestOptions = {},
