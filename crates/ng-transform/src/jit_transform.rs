@@ -147,6 +147,13 @@ fn key_name<'a>(key: &PropertyKey<'a>) -> Option<String> {
 /// whose last element is the real initializer) and may parenthesize it; the
 /// signal-API detector must look through both, else instrumented component files
 /// lose their synthesized signal `propDecorators`.
+/// Unwrap a member initializer to the underlying `input()`/`viewChild()`/… call,
+/// seeing through the wrappers source-level coverage inserts. The
+/// `SequenceExpression` case takes the LAST element because istanbul instruments a
+/// field initializer as `(++cov.s[N], <initializer>)` — counter first, the real
+/// value last. If a future coverage-wrapper shape put the value elsewhere, the
+/// signal-API detector would miss it (empty `ɵcmp.inputs`); this assumption is
+/// specific to istanbul's `(counter, value)` form.
 fn initializer_call<'a, 'b>(value: &'b Expression<'a>) -> Option<&'b CallExpression<'a>> {
     match value {
         Expression::CallExpression(call) => Some(call),
