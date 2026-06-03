@@ -27,7 +27,11 @@ unmodified from crates.io.
      end, so the coverage map mirrors the source: independent of the ES `target`
      (no `?.`/`??`/`async` branch reshaping) and free of compiler-synthesized
      nodes (the field-init constructor, `ctorParameters` arrows, the
-     dynamic-import wrapper). No existing code changed.
+     dynamic-import wrapper). No existing code changed. It intentionally does **not**
+     surface unhandled pragmas (unlike `instrument()`'s `InstrumentResult`): there is
+     no codegen here and the host has no warnings channel, so an unprocessed
+     `/* istanbul ignore */` is dropped. Add an `unhandled_pragmas` field if that ever
+     needs surfacing.
 2. **`src/lib.rs`** — re-export `instrument_program_ast` and `InstrumentAstResult`.
 3. **`Cargo.toml`** — made self-contained: literal `[package]` fields (was
    `*.workspace = true`), sibling deps repointed to crates.io, `[lints]`,
@@ -83,6 +87,17 @@ unmodified from crates.io.
    Test-only; no release behavior change. Re-apply on re-sync.
 
 No other `src/*.rs` change.
+
+## What the host actually consumes
+
+The host imports exactly **two** items from this crate:
+`oxc_coverage_instrument::{InstrumentOptions, instrument_program_ast}` (see
+`crates/ng-transform/src/lib.rs`). Everything else the crate exposes — the original
+re-parsing `instrument()` entry, `v8_to_istanbul`, every `remap_coverage*` source-map
+function, the `function_identity_overlay` / compose / remap paths — is **inert** from
+our perspective. It is kept only to vendor the crate faithfully (clippy stays quiet
+because it's all `pub`); none of it is wired into the pipeline. A future reader
+chasing callers of those exports will find none — that is expected, not a bug.
 
 ## Wiring
 
