@@ -977,10 +977,6 @@ fn ident<'a>(name: &str, ast: AstBuilder<'a>) -> Expression<'a> {
     ast.expression_identifier(SPAN, ast.allocator.alloc_str(name))
 }
 
-fn undefined<'a>(ast: AstBuilder<'a>) -> Expression<'a> {
-    ident("undefined", ast)
-}
-
 fn member<'a>(object: &str, property: &str, ast: AstBuilder<'a>) -> Expression<'a> {
     member_at(object, property, SPAN, ast)
 }
