@@ -116,15 +116,12 @@ impl<'a> ResourceTransform {
             };
             match key_name(&p.key) {
                 Some("templateUrl") => {
-                    if let Expression::StringLiteral(url) = &p.value {
-                        let url_value = url.value.as_str().to_string();
+                    if let Some(url_value) = static_string_value(&p.value) {
                         let value = self.template_value(&url_value, ast);
                         rewrite_to_template(&mut p, value, ast);
                         self.changed = true;
-                        obj.properties.push(ObjectPropertyKind::ObjectProperty(p));
-                    } else {
-                        obj.properties.push(ObjectPropertyKind::ObjectProperty(p));
                     }
+                    obj.properties.push(ObjectPropertyKind::ObjectProperty(p));
                 }
                 Some("styleUrls" | "styleUrl" | "styles" | "moduleId") => {
                     // Dropped entirely (styles are not exercised under test).
@@ -133,6 +130,22 @@ impl<'a> ResourceTransform {
                 _ => obj.properties.push(ObjectPropertyKind::ObjectProperty(p)),
             }
         }
+    }
+}
+
+/// The static string value of a `templateUrl` expression: a plain string literal
+/// or a no-substitution template literal (`` `./x.html` ``). Anything dynamic
+/// (interpolated template, identifier, …) returns `None` and is left un-inlined.
+fn static_string_value(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(s) => Some(s.value.as_str().to_string()),
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() && t.quasis.len() == 1 => t
+            .quasis[0]
+            .value
+            .cooked
+            .as_ref()
+            .map(|c| c.as_str().to_string()),
+        _ => None,
     }
 }
 

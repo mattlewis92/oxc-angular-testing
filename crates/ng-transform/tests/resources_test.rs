@@ -118,3 +118,19 @@ export class FooComponent {}
     assert!(!code.contains("templateUrl"), "{code}");
     assert!(!code.contains("styleUrls"), "{code}");
 }
+
+#[test]
+fn template_literal_template_url_is_inlined() {
+    // A no-substitution template literal `templateUrl: `./foo.component.html`` is a
+    // legal alternative to a string literal; it must inline like the string form
+    // rather than being left for a runtime fetch.
+    let src = "import { Component } from '@angular/core';\n\
+@Component({ templateUrl: `./foo.component.html` })\n\
+export class FooComponent {}\n";
+    let code = run(src, ModuleKind::CommonJs);
+    assert!(
+        code.contains("template: require(\"./foo.component.html\")"),
+        "template-literal templateUrl not inlined: {code}"
+    );
+    assert!(!code.contains("templateUrl"), "{code}");
+}
