@@ -63,24 +63,35 @@ export function deriveTransformOptions(
     : path.resolve(cwd, tsconfigPath);
   const configFile = ts.readConfigFile(resolved, ts.sys.readFile);
   if (configFile.error) {
-    // A path was provided but could not be read. Returning {} silently would
-    // drop every derived option (target, module, decorator flags) and fall back
-    // to oxc's defaults (esnext, no decorator metadata, …) — a silent
-    // miscompile. Surface it. The most common cause is an unexpanded jest
-    // `<rootDir>` token reaching here (the jest plugin expands it, but a custom
-    // wiring may not).
-    console.warn(
-      `@oxc-angular-testing: could not read tsconfig "${resolved}" — ` +
-        `falling back to defaults (no target/module/decorator options derived). ` +
-        `Pass an absolute or correctly-resolved path.`,
+    // A tsconfig was explicitly requested but can't be read — missing file or
+    // malformed JSON. Silently returning {} would drop every derived option
+    // (target/module/decorator flags) and fall back to oxc's defaults (esnext, no
+    // decorator metadata, …): a silent miscompile. This is a misconfiguration we
+    // refuse to skip — throw with the real TS diagnostic. (A common cause is an
+    // unexpanded jest `<rootDir>` token reaching here — the jest plugin expands it,
+    // but a custom wiring may not.)
+    const detail = ts.flattenDiagnosticMessageText(configFile.error.messageText, '\n');
+    throw new Error(
+      `@oxc-angular-testing: could not read tsconfig "${resolved}": ${detail} ` +
+        `If the path contains an unexpanded "<rootDir>" token, resolve it before it reaches the transform.`,
     );
-    return {};
   }
   const parsed = ts.parseJsonConfigFileContent(
     configFile.config,
     ts.sys,
     path.dirname(resolved),
   );
+  // parseJsonConfigFileContent returns best-effort options even when the config
+  // mis-parses (bad `extends`, invalid option values). Those land in `parsed.errors`
+  // and were previously ignored, yielding partial options silently. A referenced
+  // tsconfig that doesn't parse is a misconfiguration — fail loudly.
+  const parseErrors = parsed.errors.filter((d) => d.category === ts.DiagnosticCategory.Error);
+  if (parseErrors.length > 0) {
+    const detail = parseErrors
+      .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n'))
+      .join('; ');
+    throw new Error(`@oxc-angular-testing: tsconfig "${resolved}" has errors: ${detail}`);
+  }
   const co = parsed.options || {};
 
   // module: CommonJS ⇒ commonjs; anything else (ES2015+, Node16, NodeNext,
@@ -92,11 +103,25 @@ export function deriveTransformOptions(
         ? 'commonjs'
         : 'esm';
 
-  // useDefineForClassFields default mirrors TS: true when target >= ES2022.
+  // useDefineForClassFields default mirrors TS: true when the EFFECTIVE target is
+  // >= ES2022. Use ts.getEmitScriptTarget so a tsconfig that omits `target` but sets
+  // a modern `module` (node16/nodenext/esnext → effective target ES2022+) resolves
+  // the same way tsc does, instead of falling back to the Rust default (false).
   let useDefine = co.useDefineForClassFields;
-  if (useDefine === undefined && co.target !== undefined) {
-    useDefine =
-      co.target >= ts.ScriptTarget.ES2022 && co.target !== ts.ScriptTarget.JSON;
+  if (useDefine === undefined) {
+    // `ts.getEmitScriptTarget` resolves the effective target (applying module-based
+    // defaults like node16/nodenext → ES2022+). It is exported at runtime but marked
+    // `@internal` (absent from the public types), so reach it via a cast and fall
+    // back to the explicit target (or the ES5 floor) if a future TS drops it.
+    const getEmitScriptTarget = (
+      ts as unknown as {
+        getEmitScriptTarget?: (o: TS.CompilerOptions) => TS.ScriptTarget;
+      }
+    ).getEmitScriptTarget;
+    const effective = getEmitScriptTarget
+      ? getEmitScriptTarget(co)
+      : (co.target ?? ts.ScriptTarget.ES5);
+    useDefine = effective >= ts.ScriptTarget.ES2022;
   }
 
   const options: DerivedTransformOptions = {};

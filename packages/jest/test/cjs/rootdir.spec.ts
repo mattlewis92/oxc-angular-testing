@@ -17,9 +17,13 @@ describe('jest plugin: <rootDir> tsconfig resolution (R10)', () => {
     expect(code).not.toMatch(/\basync function\b/);
   });
 
-  it('without a resolvable rootDir, derives nothing (async stays native at esnext default)', () => {
+  it('without a resolvable rootDir, the unexpanded <rootDir> tsconfig is a hard error', () => {
+    // No options.config → `<rootDir>` can't expand → the literal path is unreadable.
+    // That is a misconfiguration we refuse to skip: deriveTransformOptions throws
+    // rather than silently falling back to defaults (which would miscompile).
     const t = createTransformer({ tsconfig: '<rootDir>/tsconfig.rootdir.json' });
-    const code = t.process(ASYNC, path.join(fixtures, 'x.ts'), {}).code; // no options.config
-    expect(code).toMatch(/\basync function\b/);
+    expect(() => t.process(ASYNC, path.join(fixtures, 'x.ts'), {})).toThrow(
+      /could not read tsconfig|<rootDir>/,
+    );
   });
 });
