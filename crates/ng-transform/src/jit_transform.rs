@@ -665,6 +665,28 @@ impl JitTransform {
         None
     }
 
+    /// Extract the `transform: <fn>` value from any object-literal argument of an
+    /// `input(...)` / `input.required(...)` call, cloned into the arena. Mirrors
+    /// `extract_alias`; returns `None` when no `transform` option is present.
+    fn extract_transform<'a>(
+        &self,
+        call: &CallExpression<'a>,
+        ast: AstBuilder<'a>,
+    ) -> Option<Expression<'a>> {
+        for arg in &call.arguments {
+            if let Argument::ObjectExpression(obj) = arg {
+                for p in &obj.properties {
+                    if let ObjectPropertyKind::ObjectProperty(op) = p
+                        && key_name(&op.key).as_deref() == Some("transform")
+                    {
+                        return Some(op.value.clone_in(ast.allocator));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn build_signal_decorators<'a>(
         &mut self,
         init: Initializer,
@@ -675,10 +697,12 @@ impl JitTransform {
         let mut decs = Vec::new();
         match init {
             Initializer::Input { required } => {
-                decs.push(self.input_decorator(alias, required, true, ast));
+                let transform = self.extract_transform(call, ast);
+                decs.push(self.input_decorator(alias, required, true, transform, ast));
             }
             Initializer::Model { required } => {
-                decs.push(self.input_decorator(alias, required, false, ast));
+                // model() has no `transform` option, so emit no transform prop.
+                decs.push(self.input_decorator(alias, required, false, None, ast));
                 decs.push(self.output_decorator(&format!("{alias}Change"), ast));
             }
             Initializer::Output => {
@@ -696,6 +720,7 @@ impl JitTransform {
         alias: &str,
         required: bool,
         with_transform: bool,
+        transform: Option<Expression<'a>>,
         ast: AstBuilder<'a>,
     ) -> Decorator<'a> {
         self.use_ng_symbol("Input");
@@ -705,7 +730,10 @@ impl JitTransform {
             prop("required", bool_lit(required, ast), ast),
         ];
         if with_transform {
-            props.push(prop("transform", undefined(ast), ast));
+            // Propagate the user's `transform` fn verbatim (mirrors Angular's
+            // getInitializerApiJitTransform), falling back to `undefined` when none.
+            let value = transform.unwrap_or_else(|| undefined(ast));
+            props.push(prop("transform", value, ast));
         }
         let mut args = ast.vec();
         args.push(Argument::from(object(props, ast)));

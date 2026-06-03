@@ -140,6 +140,44 @@ export class MyComponent {
 }
 
 #[test]
+fn signal_input_transform_is_propagated_verbatim() {
+    // input(v, { transform }) must carry the user's transform fn into the synthesized
+    // @Input metadata (Angular's getInitializerApiJitTransform), not `transform: undefined`.
+    let code = ts(
+        r#"import { Component, input, booleanAttribute } from '@angular/core';
+@Component({ template: '' })
+export class MyComponent {
+  disabled = input(false, { transform: booleanAttribute });
+  count = input.required({ transform: (v) => Number(v) });
+}
+"#,
+    );
+    assert!(
+        code.contains("transform: booleanAttribute"),
+        "named transform fn must be propagated verbatim: {code}"
+    );
+    assert!(
+        code.contains("transform: (v)") || code.contains("transform: v =>"),
+        "inline transform arrow must be propagated verbatim: {code}"
+    );
+    assert!(
+        !code.contains("transform: undefined"),
+        "no transform should be dropped to undefined when supplied: {code}"
+    );
+}
+
+#[test]
+fn signal_input_without_transform_stays_undefined() {
+    let code = ts(r#"import { Component, input } from '@angular/core';
+@Component({ template: '' })
+export class MyComponent {
+  name = input('');
+}
+"#);
+    assert!(code.contains("transform: undefined"), "{code}");
+}
+
+#[test]
 fn signal_model_emits_input_and_change_output() {
     let code = ts(r#"import { Component, model } from '@angular/core';
 @Component({ template: '' })
