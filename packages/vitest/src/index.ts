@@ -1,5 +1,4 @@
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
 import {
   deriveTransformOptions,
@@ -52,9 +51,11 @@ interface VitestAwareConfig {
  */
 export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
   // tsconfig derivation is deferred to `configResolved`, where the project root
-  // is known: a relative or `<rootDir>`-prefixed tsconfig path is resolved
-  // against it. Deriving at plugin-construction time (before the root is known)
-  // would mis-resolve such paths, read nothing, and silently drop `target` etc.
+  // is known, so a relative `tsconfig` path resolves against the Vite/Vitest root
+  // rather than `process.cwd()`. (Vitest has no `<rootDir>` placeholder — that is
+  // jest-only — so a relative or absolute path is all we handle here.) Deriving at
+  // plugin-construction time (before the root is known) would mis-resolve a
+  // relative path, read nothing, and silently drop `target`/decorator flags.
   let derived: DerivedTransformOptions = {};
   const stringifyRe = options.stringifyContentPathRegex ?? DEFAULT_STRINGIFY_RE;
   let autoCoverage = false;
@@ -70,11 +71,8 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
       autoCoverage = cov?.enabled === true && cov.provider === 'istanbul';
 
       if (options.tsconfig) {
-        const root = config.root;
-        const tsconfigPath = options.tsconfig.startsWith('<rootDir>')
-          ? path.join(root, options.tsconfig.slice('<rootDir>'.length))
-          : options.tsconfig;
-        derived = deriveTransformOptions(tsconfigPath, root);
+        // Resolve a relative tsconfig against the Vitest root (not cwd).
+        derived = deriveTransformOptions(options.tsconfig, config.root);
       }
     },
 

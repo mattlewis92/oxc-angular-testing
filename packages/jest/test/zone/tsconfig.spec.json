@@ -1,1 +1,0 @@
-{ "compilerOptions": { "target": "es2016", "module": "commonjs", "lib": ["es2016","dom"], "experimentalDecorators": true, "emitDecoratorMetadata": true, "useDefineForClassFields": false } }

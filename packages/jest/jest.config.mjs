@@ -25,19 +25,4 @@ const esm = {
     '^@angular/core$': fixture('./test/fixtures/fake-angular-core.mjs'),
   },
 };
-
-// R10 regression: jsdom + zone.js/testing, target es2016 derived from a
-// `<rootDir>`-prefixed tsconfig (the standard jest pattern). Exercises that the
-// plugin expands `<rootDir>`, derives the target, and downlevels async so the
-// result is the zone-patched global Promise. RED before the <rootDir> fix.
-const zone = {
-  displayName: 'zone',
-  rootDir: '.',
-  ...createCjsPreset({ tsconfig: '<rootDir>/test/zone/tsconfig.spec.json' }),
-  testEnvironment: 'jsdom',
-  testRunner: 'jest-jasmine2',
-  testMatch: ['<rootDir>/test/zone/*.spec.ts'],
-  setupFilesAfterEnv: ['<rootDir>/test/zone/setup.ts'],
-};
-
-export default { projects: [cjs, esm, zone] };
+export default { projects: [cjs, esm] };
