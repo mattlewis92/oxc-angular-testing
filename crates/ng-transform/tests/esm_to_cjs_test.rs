@@ -488,3 +488,41 @@ fn write_to_imported_binding_routes_through_namespace() {
         "no bare undeclared write: {code}"
     );
 }
+
+#[test]
+fn anonymous_default_class_gets_a_synthesized_name() {
+    // `export default class {}` — a nameless class DECLARATION is a SyntaxError, and
+    // `exports.default = undefined` loses the value. Match tsc: `class default_1 {}`
+    // + `exports.default = default_1`.
+    let code = cjs("export default class { m() { return 1; } }\n");
+    assert!(
+        code.contains("class default_1"),
+        "anonymous default class must be given a name: {code}"
+    );
+    assert!(code.contains("exports.default = default_1"), "{code}");
+    assert!(
+        !code.contains("exports.default = undefined"),
+        "the class value must not be lost: {code}"
+    );
+}
+
+#[test]
+fn anonymous_default_function_gets_a_synthesized_name() {
+    let code = cjs("export default function () { return 1; }\n");
+    assert!(
+        code.contains("function default_1"),
+        "anonymous default function must be given a name: {code}"
+    );
+    assert!(code.contains("exports.default = default_1"), "{code}");
+}
+
+#[test]
+fn named_default_class_keeps_its_name() {
+    let code = cjs("export default class Foo {}\n");
+    assert!(code.contains("class Foo"), "{code}");
+    assert!(code.contains("exports.default = Foo"), "{code}");
+    assert!(
+        !code.contains("default_1"),
+        "named default must not be renamed: {code}"
+    );
+}

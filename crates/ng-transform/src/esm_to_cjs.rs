@@ -323,7 +323,13 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
                 );
             }
             Statement::ExportDefaultDeclaration(export) => {
-                rewrite_export_default(export.unbox(), &mut exported_names, ast, &mut body);
+                rewrite_export_default(
+                    export.unbox(),
+                    &mut exported_names,
+                    &mut used_names,
+                    ast,
+                    &mut body,
+                );
             }
             Statement::ExportAllDeclaration(export) => {
                 needs.export_star = true;
@@ -869,23 +875,26 @@ fn rewrite_export_named<'a>(
 fn rewrite_export_default<'a>(
     export: oxc_ast::ast::ExportDefaultDeclaration<'a>,
     exported_names: &mut Vec<String>,
+    used_names: &mut HashMap<String, u32>,
     ast: AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
 ) {
     use oxc_ast::ast::ExportDefaultDeclarationKind as K;
     exported_names.push("default".to_string());
     match export.declaration {
-        K::FunctionDeclaration(func) => {
-            let name = func.id.as_ref().map(|i| i.name.as_str().to_string());
+        // An ANONYMOUS `export default function/class` must be given a name: a
+        // nameless function/class *declaration* is a SyntaxError, and emitting
+        // `exports.default = undefined` would lose the value. Match tsc: synthesize
+        // a `default_N` binding and assign it. A named declaration keeps its name.
+        K::FunctionDeclaration(mut func) => {
+            let name = ensure_default_name(&mut func.id, used_names, ast);
             out.push(Statement::FunctionDeclaration(func));
-            let value = name.map_or_else(|| undefined(ast), |n| ident(&n, ast));
-            out.push(assign_export_stmt("default", value, ast));
+            out.push(assign_export_stmt("default", ident(&name, ast), ast));
         }
-        K::ClassDeclaration(class) => {
-            let name = class.id.as_ref().map(|i| i.name.as_str().to_string());
+        K::ClassDeclaration(mut class) => {
+            let name = ensure_default_name(&mut class.id, used_names, ast);
             out.push(Statement::ClassDeclaration(class));
-            let value = name.map_or_else(|| undefined(ast), |n| ident(&n, ast));
-            out.push(assign_export_stmt("default", value, ast));
+            out.push(assign_export_stmt("default", ident(&name, ast), ast));
         }
         expr => {
             // An expression: `export default <expr>;`
@@ -893,6 +902,23 @@ fn rewrite_export_default<'a>(
             out.push(assign_export_stmt("default", expression, ast));
         }
     }
+}
+
+/// Return the binding name of an `export default` function/class, synthesizing a
+/// collision-safe `default_N` (via the shared name machinery) and writing it into
+/// `id` when the declaration is anonymous. Mirrors tsc's `default_N` naming.
+fn ensure_default_name<'a>(
+    id: &mut Option<oxc_ast::ast::BindingIdentifier<'a>>,
+    used_names: &mut HashMap<String, u32>,
+    ast: AstBuilder<'a>,
+) -> String {
+    if let Some(existing) = id {
+        return existing.name.as_str().to_string();
+    }
+    let name = unique_module_var("default", used_names);
+    let arena = ast.allocator.alloc_str(&name);
+    *id = Some(ast.binding_identifier(SPAN, arena));
+    name
 }
 
 fn declaration_binding_names(decl: &oxc_ast::ast::Declaration<'_>) -> Vec<String> {
