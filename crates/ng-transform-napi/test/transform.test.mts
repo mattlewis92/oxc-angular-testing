@@ -115,6 +115,31 @@ test('downleveled async uses the runtime helper and returns the global Promise (
   assert.ok(!nullishOut.includes('??'), 'nullish coalescing still downleveled at es2016');
 });
 
+test('coverage keeps the `this` receiver on optional-chaining method calls (R22)', () => {
+  // Coverage instrumentation wrapped the optional-chain CALLEE in a counter call
+  // (`cov_oc(obj?.method, id)?.()`), evaluating it to a detached function → the
+  // method ran with `this === undefined`. The receiver must survive. Run the
+  // emitted (instrumented, es2016-downleveled) code and assert the method that
+  // reads `this.value` returns it.
+  const out = transform(
+    'export function makeObj() { return { value: 42, getValue() { return this.value; } }; }\n' +
+      'export function callMethod(obj) { return obj?.getValue?.(); }\n',
+    'm.ts',
+    { module: 'commonjs', target: 'es2016', coverage: true, jitTransforms: false },
+  ).code;
+  // The instrumented callee stays a member access (receiver-preserving), not a
+  // bare `cov_*_oc(...)?.()`.
+  assert.doesNotMatch(out, /_oc\([^)]*\)\?\.\(\)/, 'optional method-call callee must not be detached');
+  const mod: { exports: { makeObj(): unknown; callMethod(o: unknown): unknown } } = {
+    exports: { makeObj: () => undefined, callMethod: () => undefined },
+  };
+  const noRequire = () => {
+    throw new Error('unexpected require');
+  };
+  new Function('exports', 'module', 'require', out)(mod.exports, mod, noRequire);
+  assert.equal(mod.exports.callMethod(mod.exports.makeObj()), 42, 'this.value via obj?.getValue?.()');
+});
+
 test('namespace import members are spy-friendly: configurable + settable (R12)', () => {
   // `import * as ns from 'cjs-dep'` → __importStar/__createBinding getter shim.
   // It must be configurable (so jest.spyOn can redefine) and settable.

@@ -1950,7 +1950,15 @@ impl<'a> Traverse<'a, CoverageState> for CoverageTransform<'_, 'a> {
         ctx: &mut TraverseCtx<'a, CoverageState>,
     ) {
         if call.optional && !self.in_ignored_subtree() {
-            self.wrap_optional_chain_link(&mut call.callee, call.span, ctx);
+            // Do NOT wrap a member-expression callee: `obj?.method?.()` would become
+            // `cov_oc(obj?.method, id)?.()`, which evaluates the callee to a detached
+            // function value and calls it with `this === undefined` (R22). The method
+            // call's receiver must survive — and the member link's own branch already
+            // records the object's short-circuit, so the call-link counter is dropped
+            // here. A non-member callee (`fn?.()`) has no receiver to lose, so wrap it.
+            if !call.callee.is_member_expression() {
+                self.wrap_optional_chain_link(&mut call.callee, call.span, ctx);
+            }
         }
     }
 

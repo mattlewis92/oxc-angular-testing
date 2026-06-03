@@ -61,6 +61,15 @@ unmodified from crates.io.
    The key must be a JS identifier (not a JSON string), so it's spliced into the
    literal source. Re-apply on re-sync; consider upstreaming.
 
+6. **`src/transform.rs`** (`enter_call_expression`) — for an OPTIONAL call
+   (`obj?.method?.()`) whose callee is a member expression, do NOT wrap the callee
+   with the `cov_oc` link observer. Wrapping it (`cov_oc(obj?.method, id)?.()`)
+   evaluates the callee to a detached function value, so the method runs with
+   `this === undefined` (R22 — broke any instrumented `obj?.m?.()` using `this`).
+   The member link's own branch already records the object's short-circuit, so the
+   call-link counter is dropped for method calls; a non-member callee (`fn?.()`)
+   has no receiver to lose and is still wrapped. Re-apply on re-sync.
+
 No other `src/*.rs` change.
 
 ## Wiring
