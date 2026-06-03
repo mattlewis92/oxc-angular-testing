@@ -3,6 +3,25 @@ import { test } from 'node:test';
 import istanbul from 'istanbul-lib-instrument';
 import { transform } from '../index.js';
 
+test('instrumented output is readable by istanbul readInitialCoverage (collectCoverageFrom 0% files)', () => {
+  // jest reports never-imported `collectCoverageFrom` files as 0% via
+  // `generateEmptyCoverage`, which transforms with instrument + extracts the empty
+  // map using istanbul's `readInitialCoverage`. That requires our instrumented
+  // output to embed the `_coverageSchema` marker (a bare-identifier key). Without
+  // it, readInitialCoverage returns null and those files are dropped from the
+  // report entirely (the "14 vs 34 files" bug).
+  const code = transform('export function f(a) { return a > 0 ? 1 : 2; }', 'never-imported.ts', {
+    module: 'commonjs',
+    coverage: true,
+    jitTransforms: false,
+  }).code;
+  const initial = (istanbul as unknown as { readInitialCoverage(c: string): unknown }).readInitialCoverage(code);
+  assert.ok(initial, 'readInitialCoverage must extract the empty coverage (else jest drops the file)');
+  const data = (initial as { path: string; coverageData: { statementMap: object } }).coverageData;
+  assert.equal((initial as { path: string }).path, 'never-imported.ts');
+  assert.ok(Object.keys(data.statementMap).length > 0, 'has a statement map');
+});
+
 // Differential coverage test: instrument each snippet with BOTH our transform and
 // the canonical `istanbul-lib-instrument` (the same engine jest/babel-plugin-istanbul
 // use), execute both with the identical exercise, and assert the resulting coverage

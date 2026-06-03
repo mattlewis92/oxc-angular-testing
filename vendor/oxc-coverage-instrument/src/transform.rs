@@ -610,7 +610,26 @@ pub fn generate_preamble_source(inputs: &PreambleInputs<'_>) -> String {
         &serde_json::to_string(coverage_hash).expect("serializing a &str to JSON is infallible"),
     );
     let _ = write!(buf, "; var gcv = '{coverage_var}'; var coverageData = ");
-    buf.push_str(coverage_json);
+    // Splice istanbul's `_coverageSchema` marker into the head of the coverageData
+    // object literal as a BARE-IDENTIFIER key (not a JSON string key):
+    // `istanbul-lib-instrument`'s `readInitialCoverage` — which jest's
+    // `generateEmptyCoverage` uses to report never-imported `collectCoverageFrom`
+    // files as 0% — locates the coverage object by an ObjectProperty whose key is
+    // the *identifier* `_coverageSchema` with this exact value. Without it those
+    // files are dropped from the report entirely. `coverage_json` is a JSON object
+    // literal beginning with `{`; the result is a mixed quoted/unquoted-key literal,
+    // which is valid JS (evaluated at runtime — never re-parsed as JSON). The extra
+    // key is harmless at runtime (istanbul's own output carries it; readInitialCoverage
+    // strips `_coverageSchema`/`hash` from what it returns).
+    const COVERAGE_SCHEMA_MAGIC: &str = "1a1c01bbd47fc00a2c39e90264f33305004495a9";
+    if let Some(body) = coverage_json.strip_prefix('{') {
+        buf.push('{');
+        let _ = write!(buf, "_coverageSchema:\"{COVERAGE_SCHEMA_MAGIC}\",");
+        buf.push_str(body);
+    } else {
+        // Defensive: a non-object coverage literal (shouldn't occur for a FileCoverage).
+        buf.push_str(coverage_json);
+    }
     let _ = writeln!(
         buf,
         "; coverageData.hash = hash; var coverage = typeof globalThis !== 'undefined' ? globalThis : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : this; if (!coverage[gcv]) {{ coverage[gcv] = {{}}; }} if (!coverage[gcv][path] || coverage[gcv][path].hash !== hash) {{ coverage[gcv][path] = coverageData; }} var actualCoverage = coverage[gcv][path]; return actualCoverage; }})();"

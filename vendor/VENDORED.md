@@ -51,6 +51,16 @@ unmodified from crates.io.
    istanbul's `cov.s[N]++; export const f = …`). Re-apply on re-sync; consider
    upstreaming.
 
+5. **`src/transform.rs`** (`generate_preamble_source`) — splice istanbul's
+   `_coverageSchema` marker (bare-identifier key `_coverageSchema:"1a1c01bbd47…"`)
+   into the head of the emitted `coverageData` object literal. Upstream's preamble
+   embeds the `FileCoverage` JSON with no schema key, so
+   `istanbul-lib-instrument`'s `readInitialCoverage` (used by jest's
+   `generateEmptyCoverage` to report never-imported `collectCoverageFrom` files as
+   0%) can't locate the coverage object → those files are dropped from the report.
+   The key must be a JS identifier (not a JSON string), so it's spliced into the
+   literal source. Re-apply on re-sync; consider upstreaming.
+
 No other `src/*.rs` change.
 
 ## Wiring
