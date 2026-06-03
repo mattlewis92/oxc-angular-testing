@@ -355,101 +355,13 @@ pub fn instrument(
 
 // ============================================================================
 // VENDOR PATCH (oxc-angular-testing): see ../../expose-transform.patch.
-// `instrument_program` is the only addition to this file. It is the post-parse
-// half of `instrument()` above, operating on a program the caller already
-// parsed (and possibly already transformed) in `allocator`. It deliberately
-// does NOT parse and does NOT run the TypeScript-strip pass, so the host
-// pipeline can share one parse and one codegen across its own transforms and
-// coverage instrumentation. Codegen + preamble emission stay here so the
-// coverage counters and the `coverageData` preamble emit in a single codegen.
+// `instrument_program_ast` (below) is the only addition to this file — the
+// post-parse half of `instrument()` above, MINUS codegen. It operates on a
+// program the caller already parsed (and possibly already transformed) in
+// `allocator`, inserts the coverage counters, and returns the coverage map +
+// preamble text WITHOUT emitting code. The host then runs its own AST transforms
+// and codegens once, so the whole pipeline shares one parse and one codegen.
 // ============================================================================
-
-/// Instrument an already-parsed program in place, reusing the caller's arena.
-///
-/// Unlike [`instrument`], this does not parse the source and does not run the
-/// TypeScript-strip pass — the caller owns those phases. `source` must be the
-/// original source text the program's spans index into (used for span→location
-/// mapping and as codegen source text).
-///
-/// # Errors
-///
-/// Returns an error if `coverage_variable` is not a valid JS identifier.
-pub fn instrument_program<'a>(
-    allocator: &'a Allocator,
-    program: &mut Program<'a>,
-    source: &str,
-    filename: &str,
-    options: &InstrumentOptions,
-) -> Result<InstrumentResult, InstrumentError> {
-    if !is_valid_js_identifier(&options.coverage_variable) {
-        return Err(InstrumentError::InvalidCoverageVariable(options.coverage_variable.clone()));
-    }
-
-    let (pragmas, unhandled_pragmas) = PragmaMap::from_program(program, source);
-    if pragmas.ignore_file {
-        return Ok(empty_coverage_result(filename, source, unhandled_pragmas));
-    }
-
-    let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
-
-    let cov_fn_name = generate_cov_fn_name(filename);
-
-    let mut transform = CoverageTransform::new(TransformInit {
-        allocator,
-        source,
-        cov_fn_name: &cov_fn_name,
-        report_logic: options.report_logic,
-        ignore_class_methods: options.ignore_class_methods.clone(),
-    });
-    let state = CoverageState { pragmas };
-    let scoping = traverse_mut(&mut transform, allocator, program, scoping, state);
-
-    let mut coverage_map =
-        build_coverage_map(filename, transform, options.input_source_map.as_deref());
-    if options.function_identity_overlay {
-        coverage_map.x_fallow_function_map =
-            Some(build_function_identity_map(&coverage_map.path, &coverage_map.fn_map));
-    }
-
-    if options.compose_input_source_map
-        && options.input_source_map.is_some()
-        && let Some(composed) = oxc_coverage_source_maps::remap_coverage(&coverage_map)
-    {
-        coverage_map = composed;
-    }
-
-    let coverage_json = serialize_coverage_map(&coverage_map);
-    let coverage_hash = djb31_hex(&coverage_json);
-
-    let preamble = generate_preamble_source(&PreambleInputs {
-        coverage: &coverage_map,
-        coverage_json: &coverage_json,
-        coverage_hash: &coverage_hash,
-        coverage_var: &options.coverage_variable,
-        cov_fn_name: &cov_fn_name,
-        report_logic: options.report_logic,
-    });
-
-    let (code, raw_source_map) = emit_code(EmitInputs {
-        program,
-        scoping,
-        source,
-        filename,
-        preamble: &preamble,
-        options,
-    });
-    let source_map = raw_source_map
-        .as_ref()
-        .map(|sm| finalize_source_map(sm, &preamble, options.input_source_map.as_deref()));
-
-    Ok(InstrumentResult {
-        code,
-        coverage_map,
-        coverage_map_json: coverage_json,
-        source_map,
-        unhandled_pragmas,
-    })
-}
 
 /// VENDOR PATCH (oxc-angular-testing): instrument the program **without** codegen.
 ///

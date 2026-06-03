@@ -19,10 +19,7 @@ unmodified from crates.io.
 
 ## Local changes (see `expose-transform.patch`)
 
-1. **`src/instrument.rs`** — added two public functions on top of `instrument()`:
-   - `instrument_program(allocator, program, source, filename, options)`: the
-     post-parse half of `instrument()` (instrument **and** codegen), operating on
-     a program the caller already parsed/transformed in their arena.
+1. **`src/instrument.rs`** — added one public function on top of `instrument()`:
    - `instrument_program_ast(...)` → `InstrumentAstResult { coverage_map_json,
      preamble }`: instrument **without** codegen — insert the counters into the
      program and return the coverage map + preamble text. This lets us instrument
@@ -31,8 +28,7 @@ unmodified from crates.io.
      (no `?.`/`??`/`async` branch reshaping) and free of compiler-synthesized
      nodes (the field-init constructor, `ctorParameters` arrows, the
      dynamic-import wrapper). No existing code changed.
-2. **`src/lib.rs`** — re-export `instrument_program`, `instrument_program_ast`,
-   `InstrumentAstResult`.
+2. **`src/lib.rs`** — re-export `instrument_program_ast` and `InstrumentAstResult`.
 3. **`Cargo.toml`** — made self-contained: literal `[package]` fields (was
    `*.workspace = true`), sibling deps repointed to crates.io, `[lints]`,
    `[[bench]]`, and `[dev-dependencies]` removed (not needed for our use).
@@ -88,8 +84,11 @@ member (it builds only as a patch target).
 
 1. `git clone --branch <new-tag> https://github.com/fallow-rs/oxc-coverage-instrument`
 2. Copy `crates/oxc-coverage-instrument/src` over `vendor/oxc-coverage-instrument/src`.
-3. Re-apply `expose-transform.patch` (or re-add `instrument_program` + the lib.rs
-   re-export by hand — it is ~80 lines mirroring `instrument()`).
+3. Re-apply `expose-transform.patch` (or re-add `instrument_program_ast` +
+   `InstrumentAstResult` + the lib.rs re-export by hand — it is ~70 lines mirroring
+   `instrument()` minus its codegen tail). The patch's `@@` line numbers track
+   upstream v0.7.6; on a version bump re-apply by hand, then regenerate the patch
+   with `diff -u <upstream>/src/{lib,instrument}.rs vendor/oxc-coverage-instrument/src/{lib,instrument}.rs`.
 4. Refresh the self-contained `Cargo.toml` (bump oxc/sibling versions to match the
    new tag's manifest), then bump `oxc_* = "=<new>"` across our crates in lockstep.
 5. Update the tag/commit above.

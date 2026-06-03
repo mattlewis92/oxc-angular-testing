@@ -36,8 +36,8 @@ mod v8_to_istanbul;
 
 pub use instrument::{
     DecoratorMode, InstrumentError, InstrumentOptions, InstrumentResult, instrument,
-    // VENDOR PATCH (oxc-angular-testing): post-parse entries for shared-AST pipelines.
-    InstrumentAstResult, instrument_program, instrument_program_ast,
+    // VENDOR PATCH (oxc-angular-testing): post-parse, no-codegen entry for shared-AST pipelines.
+    InstrumentAstResult, instrument_program_ast,
 };
 pub use oxc_coverage_source_maps::{
     RemapOptions, SourceMapStore, remap_coverage, remap_coverage_map,

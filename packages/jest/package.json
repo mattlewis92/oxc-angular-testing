@@ -15,14 +15,6 @@
       "types": "./dist/presets.d.ts",
       "default": "./dist/presets.js"
     },
-    "./html-transformer": {
-      "types": "./dist/html-transformer.d.ts",
-      "default": "./dist/html-transformer.js"
-    },
-    "./html-transformer-cjs": {
-      "types": "./dist/html-transformer-cjs.d.ts",
-      "default": "./dist/html-transformer-cjs.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [

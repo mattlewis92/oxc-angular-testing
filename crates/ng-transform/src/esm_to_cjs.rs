@@ -29,7 +29,7 @@ use oxc_ast::ast::{
     ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget,
     Statement, UpdateOperator, VariableDeclarationKind,
 };
-use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SPAN};
 use oxc_syntax::symbol::SymbolId;
 use oxc_traverse::{Traverse, TraverseCtx, traverse_mut};
@@ -42,7 +42,11 @@ const IMPORT_DEFAULT: &str = "var __importDefault = (this && this.__importDefaul
 // `import * as ns from 'cjs-dep'` (tsc's shape throws "Cannot redefine property";
 // ts-jest's namespaces happened to be spyable). Read-through via the getter is
 // unchanged; the setter writes back to the source module.
-const IMPORT_STAR: &str = r#"var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+//
+// Both `__importStar` and `__exportStar` reference `__createBinding`, so it is
+// factored out here and emitted once (tsc dedups its helpers the same way) when
+// either star helper is needed; the star constants below assume it precedes them.
+const CREATE_BINDING: &str = r#"var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
     if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
@@ -53,7 +57,9 @@ const IMPORT_STAR: &str = r#"var __createBinding = (this && this.__createBinding
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
 }));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+"#;
+
+const IMPORT_STAR: &str = r#"var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
     Object.defineProperty(o, "default", { enumerable: true, value: v });
 }) : function(o, v) {
     o["default"] = v;
@@ -77,18 +83,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 "#;
 
-const EXPORT_STAR: &str = r#"var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, configurable: true, get: function() { return m[k]; }, set: function(v) { m[k] = v; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __exportStar = (this && this.__exportStar) || function(m, exports) {
+const EXPORT_STAR: &str = r#"var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 "#;
@@ -266,7 +261,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
             .build(program)
             .semantic
             .into_scoping();
-        let mut symbol_map = build_symbol_map(program, &scoping, &replacements);
+        let mut symbol_map = build_symbol_map(program, &replacements);
         // Directly-exported `const`/`let`/`var` route every reference through
         // `exports.<name>` (tsc model): so `jest.spyOn(ns, name)` intercepts
         // intra-module calls (R18) and mutable exports are live (R15). Added to
@@ -285,7 +280,6 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
         let live_bindings = build_specifier_export_map(program);
         let mut rewriter = RefRewriter {
             symbol_map,
-            replacements: replacements.clone(),
             live_bindings,
             import_star_used: false,
         };
@@ -378,6 +372,10 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
     if needs.import_default {
         prelude.push_str(IMPORT_DEFAULT);
     }
+    // `__createBinding` underpins both star helpers; emit it once, before either.
+    if needs.import_star || needs.export_star {
+        prelude.push_str(CREATE_BINDING);
+    }
     if needs.import_star {
         prelude.push_str(IMPORT_STAR);
     }
@@ -419,7 +417,6 @@ fn unique_module_var(source: &str, used: &mut HashMap<String, u32>) -> String {
 /// be rewritten without tripping on shadowing.
 fn build_symbol_map<'a>(
     program: &Program<'a>,
-    _scoping: &Scoping,
     replacements: &HashMap<String, Replacement>,
 ) -> HashMap<SymbolId, Replacement> {
     let mut map = HashMap::new();
@@ -553,7 +550,6 @@ fn collect_pattern_symbols<'a>(pattern: &BindingPattern<'a>, out: &mut HashMap<&
 
 struct RefRewriter {
     symbol_map: HashMap<SymbolId, Replacement>,
-    replacements: HashMap<String, Replacement>,
     /// Module-scope mutable exported bindings (`SymbolId` → exported name). Writes
     /// to these are mirrored into `exports.<name>` so importers see live values.
     live_bindings: HashMap<SymbolId, String>,
@@ -732,19 +728,14 @@ impl RefRewriter {
         let Expression::Identifier(id) = callee else {
             return None;
         };
-        // If the reference resolves to a binding, that binding is authoritative:
-        // rewrite only when it is our import symbol, never when a parameter/local
-        // of the same name shadows the import (else we'd miscompile the shadow —
-        // a general correctness bug, e.g. `@angular/core`'s `keyValueArraySet`
-        // parameter). Only when the reference is genuinely unresolved (no symbol —
-        // e.g. an identifier synthesized by an earlier pass with no `reference_id`)
-        // do we fall back to matching by name.
-        if let Some(rid) = id.reference_id.get()
-            && let Some(symbol_id) = ctx.scoping().get_reference(rid).symbol_id()
-        {
-            return self.symbol_map.get(&symbol_id).cloned();
-        }
-        self.replacements.get(id.name.as_str()).cloned()
+        // The reference's resolved binding is authoritative: rewrite only when it
+        // is our import symbol, never when a parameter/local of the same name
+        // shadows the import (else we'd miscompile the shadow — a general
+        // correctness bug, e.g. `@angular/core`'s `keyValueArraySet` parameter).
+        // esm_to_cjs runs a fresh `SemanticBuilder` before this traversal, so every
+        // identifier (including ones synthesized by earlier passes) carries a
+        // `reference_id`; there is no unresolved-by-name fallback to make.
+        self.reference_replacement(id.reference_id.get(), ctx)
     }
 }
 
