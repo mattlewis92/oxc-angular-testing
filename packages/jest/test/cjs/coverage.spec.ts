@@ -42,6 +42,19 @@ describe('@oxc-angular-testing/jest — coverage instrumentation', () => {
     expect(out.code).toContain('exports.classify');
   });
 
+  it('top-level coverage option wins over the runner instrument signal (both directions)', () => {
+    // explicit `coverage: true` forces instrumentation even when jest didn't request it
+    const forcedOn = createTransformer({ module: 'commonjs', coverage: true });
+    expect(forcedOn.process(src, '/proj/classify.ts', { instrument: false }).code).toContain(
+      '__coverage__',
+    );
+    // explicit `coverage: false` disables it even when jest DID request it
+    const forcedOff = createTransformer({ module: 'commonjs', coverage: false });
+    expect(forcedOff.process(src, '/proj/classify.ts', { instrument: true }).code).not.toContain(
+      '__coverage__',
+    );
+  });
+
   it('varies the cache key by instrument (no stale non-instrumented cache hit)', () => {
     const withCov = transformer.getCacheKey(src, '/proj/classify.ts', { instrument: true });
     const noCov = transformer.getCacheKey(src, '/proj/classify.ts', { instrument: false });

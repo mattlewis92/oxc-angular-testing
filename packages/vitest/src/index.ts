@@ -95,10 +95,11 @@ export interface OxcAngularOptions {
   stringifyContentPathRegex?: RegExp;
   /**
    * Override individual transform options forwarded to the Rust transform.
-   * `module` is intentionally excluded: Vitest always runs native ESM, so this
-   * plugin only ever emits ESM.
+   * `module` is intentionally excluded (Vitest always runs native ESM, so this
+   * plugin only ever emits ESM), as is `coverage` (controlled by the dedicated
+   * top-level `coverage` option + the auto-detected istanbul provider).
    */
-  transform?: Partial<Omit<TransformOptions, 'module'>>;
+  transform?: Partial<Omit<TransformOptions, 'module' | 'coverage'>>;
 }
 
 // Vitest augments Vite's resolved config with a `test` field; type the slice we
@@ -161,8 +162,13 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
       handler(code: string, id: string) {
         const opts: TransformOptions = {
           ...derived,
-          coverage: options.coverage ?? autoCoverage,
           ...options.transform,
+          // Coverage precedence (identical in the jest plugin): an explicit
+          // top-level `coverage` option wins (true OR false); otherwise derive from
+          // the runner — here the auto-detected istanbul provider. Computed AFTER the
+          // `transform` spread, and `coverage` is excluded from `transform`'s type, so
+          // there is no second, inconsistent knob.
+          coverage: options.coverage ?? autoCoverage,
           // Vitest runs native ESM: force `esm` last so neither the
           // tsconfig-derived options nor an explicit override can select CJS.
           module: 'esm',

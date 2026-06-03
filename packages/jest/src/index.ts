@@ -118,7 +118,9 @@ export interface OxcAngularJestOptions {
    */
   stringifyContentPathRegex?: string | null;
   /** Override individual transform options forwarded to the Rust transform. */
-  transform?: Partial<Omit<TransformOptions, 'module'>>;
+  // `module` is set from the tsconfig/preset; `coverage` is controlled by the
+  // dedicated top-level `coverage` option + jest's instrument signal (see process()).
+  transform?: Partial<Omit<TransformOptions, 'module' | 'coverage'>>;
 }
 
 /** Minimal structural shape of a synchronous jest transformer. */
@@ -248,7 +250,12 @@ export function createTransformer(
         ...derived,
         ...transformerOptions.transform,
         module: moduleKind,
-        coverage: collectCoverage || Boolean(transformerOptions.coverage),
+        // Coverage precedence (identical in the vitest plugin): an explicit
+        // top-level `coverage` option wins (true OR false); otherwise derive from
+        // the runner — here jest's per-file `instrument` signal. `coverage` is not
+        // settable via `transform` (excluded from its type), so there is no second,
+        // inconsistent knob.
+        coverage: transformerOptions.coverage ?? collectCoverage,
         // Hoist `jest.mock()` above imports for the user's test code (jest
         // requires this). Deps are library code with no jest.mock + skip JIT.
         ...(isDep
