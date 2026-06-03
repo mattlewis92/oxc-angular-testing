@@ -66,6 +66,16 @@ unmodified from crates.io.
    call-link counter is dropped for method calls; a non-member callee (`fn?.()`)
    has no receiver to lose and is still wrapped. Re-apply on re-sync.
 
+   **Known coverage gap (intentional):** because the skip keys off *any* member-
+   expression callee, `obj.method?.()` — where the member is non-optional and the
+   only `?.` is the call's own — records **no** optional-chain branch: the call-link
+   is skipped, and the static-member visitor only records when the member itself is
+   optional. We accept this rather than wrap it, because wrapping `obj.method?.()`
+   would detach `this` exactly as in `obj?.method?.()` (any wrapped member callee
+   loses its receiver). Statement coverage for the call is unaffected — only that
+   one optional-call *branch* counter is missing. Recording it correctly would need
+   a receiver-preserving rewrite (a temp-bound receiver), not the `cov_oc` wrapper.
+
 No other `src/*.rs` change.
 
 ## Wiring
