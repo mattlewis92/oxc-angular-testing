@@ -50,12 +50,18 @@ pub struct InstrumentOptions {
     /// al.) that dump `window.__coverage__` directly and want original-source
     /// positions without a normalization pass.
     ///
-    /// Composition uses the default keep-generated-position semantics for
-    /// positions whose source-map lookup fails (matching `remap_coverage` /
-    /// `remapCoverageMap` called without options). If the input map is unusable
-    /// (declares no source, fails to parse), composition backs off and the
-    /// embedded `inputSourceMap` is left in place so the lazy remap path still
-    /// works. Has no effect when `input_source_map` is `None`.
+    /// In eager mode a coverage point whose positions do not remap through the
+    /// input source map is NOT instrumented at all: it gets no `statementMap` /
+    /// `fnMap` / `branchMap` entry AND no counter in the emitted code. The
+    /// runtime `__coverage__` object and the emitted counters therefore always
+    /// agree (no dangling `++cov.b[id][...]` against a pruned slot). Composition
+    /// itself is then a pure remap of the surviving positions to original
+    /// coordinates, so it never emits past-EOF entries (e.g. compiler
+    /// boilerplate in a Vue SFC chunk that has no mapping back to the `.vue` is
+    /// simply never instrumented). If the input map is unusable (declares no
+    /// source, fails to parse), the gate is off and the embedded
+    /// `inputSourceMap` is left in place so the lazy remap path still works. Has
+    /// no effect when `input_source_map` is `None`.
     ///
     /// Defaults to false.
     pub compose_input_source_map: bool,
@@ -63,6 +69,21 @@ pub struct InstrumentOptions {
     /// This enables nyc-style logic coverage that tracks not just which branch was
     /// taken, but whether each operand evaluated to a truthy value.
     pub report_logic: bool,
+    /// When true (the default), each optional-chaining (`?.`) link is tracked as
+    /// an `optional-chain` branch: its operand is wrapped in a `cov_fn_oc`
+    /// helper call that records whether the value was nullish. This is more
+    /// complete than `istanbul-lib-instrument`, which does not track `?.` as a
+    /// branch.
+    ///
+    /// Set to false to leave optional chains native: no `cov_fn_oc` helper is
+    /// emitted and no `optional-chain` branch is registered. This matches
+    /// `istanbul-lib-instrument` byte-for-byte on `?.` and avoids the
+    /// per-operand helper-call overhead in optional-chain-dense hot paths
+    /// (issue #108). Statement, function, and other branch coverage are
+    /// unaffected.
+    ///
+    /// Defaults to true so existing behavior is unchanged.
+    pub track_optional_chain: bool,
     /// Class method names to exclude from coverage instrumentation.
     /// Matches Istanbul's `ignoreClassMethods` behavior for class methods and
     /// named function expressions with a matching id.
@@ -181,6 +202,7 @@ impl Default for InstrumentOptions {
             input_source_map: None,
             compose_input_source_map: false,
             report_logic: false,
+            track_optional_chain: true,
             ignore_class_methods: Vec::new(),
             strip_typescript: false,
             decorator_mode: DecoratorMode::PassThrough,
@@ -287,34 +309,14 @@ pub fn instrument(
         source,
         cov_fn_name: &cov_fn_name,
         report_logic: options.report_logic,
+        track_optional_chain: options.track_optional_chain,
         ignore_class_methods: options.ignore_class_methods.clone(),
+        eager_remapper: eager_remapper(options),
     });
     let state = CoverageState { pragmas };
     let scoping = traverse_mut(&mut transform, &allocator, &mut parsed.program, scoping, state);
 
-    let mut coverage_map =
-        build_coverage_map(filename, transform, options.input_source_map.as_deref());
-    if options.function_identity_overlay {
-        coverage_map.x_fallow_function_map =
-            Some(build_function_identity_map(&coverage_map.path, &coverage_map.fn_map));
-    }
-
-    // Eager composition (issue #100): when requested, fold the embedded
-    // `inputSourceMap` into the coverage map now, before the map is serialized
-    // into the preamble's `coverageData` literal. The runtime `__coverage__`
-    // then ships original-source positions/path and `remap_coverage` on the
-    // result is a no-op. Run AFTER the function-identity overlay attaches so
-    // the overlay's ids stay derived from the pre-remap positions, keeping the
-    // eager path bit-for-bit equal to instrument-then-`remap_coverage` (the
-    // remap pipeline intentionally does not rewrite the overlay). When the
-    // input map is unusable, `remap_coverage` returns `None` and we leave the
-    // embedded map in place so the lazy remap path remains available.
-    if options.compose_input_source_map
-        && options.input_source_map.is_some()
-        && let Some(composed) = oxc_coverage_source_maps::remap_coverage(&coverage_map)
-    {
-        coverage_map = composed;
-    }
+    let coverage_map = finalize_coverage_map(filename, transform, options);
 
     // Serialize the coverage map once and reuse it for both the hash guard and
     // the preamble's coverageData literal. Istanbul refreshes stale coverage
@@ -350,85 +352,6 @@ pub fn instrument(
         coverage_map_json: coverage_json,
         source_map,
         unhandled_pragmas,
-    })
-}
-
-// ============================================================================
-// VENDOR PATCH (oxc-angular-testing): see ../../expose-transform.patch.
-// `instrument_program_ast` (below) is the only addition to this file — the
-// post-parse half of `instrument()` above, MINUS codegen. It operates on a
-// program the caller already parsed (and possibly already transformed) in
-// `allocator`, inserts the coverage counters, and returns the coverage map +
-// preamble text WITHOUT emitting code. The host then runs its own AST transforms
-// and codegens once, so the whole pipeline shares one parse and one codegen.
-// ============================================================================
-
-/// VENDOR PATCH (oxc-angular-testing): instrument the program **without** codegen.
-///
-/// Inserts the coverage counters into `program` and returns the istanbul coverage
-/// map (JSON) plus the preamble source text. The caller runs its own AST
-/// transforms afterwards (TS strip, decorator lowering, ESM→CJS, …) and codegens
-/// once, prepending `preamble`. Instrumenting *before* those transforms is what
-/// makes the coverage map mirror the original source: it is independent of the
-/// `target` (no `?.`/`??`/`async` reshaping) and never sees compiler-synthesized
-/// nodes (the field-init constructor, `ctorParameters` arrows, etc.).
-pub struct InstrumentAstResult {
-    /// Serialized istanbul `FileCoverage` (statementMap / fnMap / branchMap).
-    pub coverage_map_json: String,
-    /// Preamble source (`var <cov> = (function () { … })();`) to emit before the
-    /// instrumented code. Empty when the file is `/* istanbul ignore file */`.
-    pub preamble: String,
-}
-
-/// See [`InstrumentAstResult`]. Mutates `program` in place (inserts counters);
-/// `source` provides the original byte offsets the coverage map references.
-pub fn instrument_program_ast<'a>(
-    allocator: &'a Allocator,
-    program: &mut Program<'a>,
-    source: &str,
-    filename: &str,
-    options: &InstrumentOptions,
-) -> Result<InstrumentAstResult, InstrumentError> {
-    if !is_valid_js_identifier(&options.coverage_variable) {
-        return Err(InstrumentError::InvalidCoverageVariable(
-            options.coverage_variable.clone(),
-        ));
-    }
-    let (pragmas, unhandled) = PragmaMap::from_program(program, source);
-    if pragmas.ignore_file {
-        let empty = empty_coverage_result(filename, source, unhandled);
-        return Ok(InstrumentAstResult {
-            coverage_map_json: empty.coverage_map_json,
-            preamble: String::new(),
-        });
-    }
-    let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
-    let cov_fn_name = generate_cov_fn_name(filename);
-    let mut transform = CoverageTransform::new(TransformInit {
-        allocator,
-        source,
-        cov_fn_name: &cov_fn_name,
-        report_logic: options.report_logic,
-        ignore_class_methods: options.ignore_class_methods.clone(),
-    });
-    let state = CoverageState { pragmas };
-    let _scoping = traverse_mut(&mut transform, allocator, program, scoping, state);
-
-    let coverage_map =
-        build_coverage_map(filename, transform, options.input_source_map.as_deref());
-    let coverage_json = serialize_coverage_map(&coverage_map);
-    let coverage_hash = djb31_hex(&coverage_json);
-    let preamble = generate_preamble_source(&PreambleInputs {
-        coverage: &coverage_map,
-        coverage_json: &coverage_json,
-        coverage_hash: &coverage_hash,
-        coverage_var: &options.coverage_variable,
-        cov_fn_name: &cov_fn_name,
-        report_logic: options.report_logic,
-    });
-    Ok(InstrumentAstResult {
-        coverage_map_json: coverage_json,
-        preamble,
     })
 }
 
@@ -490,6 +413,86 @@ fn parse_program<'a>(
     }
 }
 
+// ============================================================================
+// VENDOR PATCH (oxc-angular-testing): see ../../expose-transform.patch.
+// `instrument_program_ast` (below) is the only addition to this file — the
+// post-parse half of `instrument()` above, MINUS codegen. It operates on a
+// program the caller already parsed (and possibly already transformed) in
+// `allocator`, inserts the coverage counters, and returns the coverage map +
+// preamble text WITHOUT emitting code. The host then runs its own AST transforms
+// and codegens once, so the whole pipeline shares one parse and one codegen.
+// ============================================================================
+
+/// VENDOR PATCH (oxc-angular-testing): instrument the program **without** codegen.
+///
+/// Inserts the coverage counters into `program` and returns the istanbul coverage
+/// map (JSON) plus the preamble source text. The caller runs its own AST
+/// transforms afterwards (TS strip, decorator lowering, ESM→CJS, …) and codegens
+/// once, prepending `preamble`. Instrumenting *before* those transforms is what
+/// makes the coverage map mirror the original source: it is independent of the
+/// `target` (no `?.`/`??`/`async` reshaping) and never sees compiler-synthesized
+/// nodes (the field-init constructor, `ctorParameters` arrows, etc.).
+pub struct InstrumentAstResult {
+    /// Serialized istanbul `FileCoverage` (statementMap / fnMap / branchMap).
+    pub coverage_map_json: String,
+    /// Preamble source (`var <cov> = (function () { … })();`) to emit before the
+    /// instrumented code. Empty when the file is `/* istanbul ignore file */`.
+    pub preamble: String,
+}
+
+/// See [`InstrumentAstResult`]. Mutates `program` in place (inserts counters);
+/// `source` provides the original byte offsets the coverage map references.
+pub fn instrument_program_ast<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    filename: &str,
+    options: &InstrumentOptions,
+) -> Result<InstrumentAstResult, InstrumentError> {
+    if !is_valid_js_identifier(&options.coverage_variable) {
+        return Err(InstrumentError::InvalidCoverageVariable(
+            options.coverage_variable.clone(),
+        ));
+    }
+    let (pragmas, unhandled) = PragmaMap::from_program(program, source);
+    if pragmas.ignore_file {
+        let empty = empty_coverage_result(filename, source, unhandled);
+        return Ok(InstrumentAstResult {
+            coverage_map_json: empty.coverage_map_json,
+            preamble: String::new(),
+        });
+    }
+    let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
+    let cov_fn_name = generate_cov_fn_name(filename);
+    let mut transform = CoverageTransform::new(TransformInit {
+        allocator,
+        source,
+        cov_fn_name: &cov_fn_name,
+        report_logic: options.report_logic,
+        track_optional_chain: options.track_optional_chain,
+        ignore_class_methods: options.ignore_class_methods.clone(),
+        eager_remapper: eager_remapper(options),
+    });
+    let state = CoverageState { pragmas };
+    let _scoping = traverse_mut(&mut transform, allocator, program, scoping, state);
+
+    let coverage_map = finalize_coverage_map(filename, transform, options);
+    let coverage_json = serialize_coverage_map(&coverage_map);
+    let coverage_hash = djb31_hex(&coverage_json);
+    let preamble = generate_preamble_source(&PreambleInputs {
+        coverage: &coverage_map,
+        coverage_json: &coverage_json,
+        coverage_hash: &coverage_hash,
+        coverage_var: &options.coverage_variable,
+        cov_fn_name: &cov_fn_name,
+        report_logic: options.report_logic,
+    });
+    Ok(InstrumentAstResult {
+        coverage_map_json: coverage_json,
+        preamble,
+    })
+}
+
 fn empty_coverage_result(
     filename: &str,
     source: &str,
@@ -527,6 +530,57 @@ fn build_coverage_map(
     if let Some(input_sm) = input_source_map {
         coverage_map.input_source_map = serde_json::from_str(input_sm).ok();
     }
+    coverage_map
+}
+
+fn eager_remapper(
+    options: &InstrumentOptions,
+) -> Option<oxc_coverage_source_maps::PositionRemapper> {
+    if !options.compose_input_source_map {
+        return None;
+    }
+
+    options
+        .input_source_map
+        .as_deref()
+        .and_then(oxc_coverage_source_maps::PositionRemapper::from_json)
+}
+
+fn finalize_coverage_map(
+    filename: &str,
+    transform: CoverageTransform<'_, '_>,
+    options: &InstrumentOptions,
+) -> FileCoverage {
+    let mut coverage_map =
+        build_coverage_map(filename, transform, options.input_source_map.as_deref());
+    if options.function_identity_overlay {
+        coverage_map.x_fallow_function_map =
+            Some(build_function_identity_map(&coverage_map.path, &coverage_map.fn_map));
+    }
+
+    // Eager composition (issue #100): when requested, fold the embedded
+    // `inputSourceMap` into the coverage map now, before the map is serialized
+    // into the preamble's `coverageData` literal. The runtime `__coverage__`
+    // then ships original-source positions/path and `remap_coverage` on the
+    // result is a no-op. Run AFTER the function-identity overlay attaches so
+    // the overlay's ids stay derived from the pre-remap positions, keeping the
+    // eager path bit-for-bit equal to instrument-then-remap (the remap pipeline
+    // intentionally does not rewrite the overlay). When the input map is
+    // unusable, the remap returns `None` and we leave the embedded map in place
+    // so the lazy remap path remains available.
+    //
+    // Drop-at-the-AST-level (issue #106): the transform above was given the same
+    // `inputSourceMap`-backed position-remap predicate, so unmappable statement /
+    // function / branch points were never instrumented (no map entry, no
+    // counter). The instrumented code and coverage data are therefore derived
+    // from the same decision and consistent by construction.
+    if options.compose_input_source_map
+        && options.input_source_map.is_some()
+        && let Some(composed) = oxc_coverage_source_maps::remap_coverage(&coverage_map)
+    {
+        return composed;
+    }
+
     coverage_map
 }
 
@@ -585,7 +639,13 @@ pub(crate) fn collect_for_v8_to_istanbul(
         source,
         cov_fn_name: &cov_fn_name,
         report_logic: false,
+        // V8-collect builds the location maps that V8 byte ranges intersect
+        // against, so optional-chain branches stay tracked (the default); this
+        // path emits no runtime helper, only the maps.
+        track_optional_chain: true,
         ignore_class_methods: Vec::new(),
+        // V8-collect never composes an input source map; gate is a no-op.
+        eager_remapper: None,
     });
     let state = CoverageState { pragmas };
     let _scoping = traverse_mut(&mut transform, &allocator, &mut parsed.program, scoping, state);

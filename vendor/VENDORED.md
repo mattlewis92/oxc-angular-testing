@@ -9,8 +9,8 @@ entry point.
 ## Source
 
 - Repo: <https://github.com/fallow-rs/oxc-coverage-instrument>
-- Tag: **v0.7.6**
-- Commit: **8faba6df9f994c911401ad394b50351b8ca7f943**
+- Tag: **v0.9.0**
+- Commit: **bce77875e81522bdb582456b394154cbdefdedc8**
 - Path taken: `crates/oxc-coverage-instrument/{src,Cargo.toml}`
 
 Only this one crate's `src/` is vendored. Its sibling suite crates
@@ -31,7 +31,10 @@ unmodified from crates.io.
      surface unhandled pragmas (unlike `instrument()`'s `InstrumentResult`): there is
      no codegen here and the host has no warnings channel, so an unprocessed
      `/* istanbul ignore */` is dropped. Add an `unhandled_pragmas` field if that ever
-     needs surfacing.
+     needs surfacing. It mirrors `instrument()`'s `TransformInit` construction, so on
+     a re-sync keep its fields in lockstep (as of v0.9.0: `allocator`, `source`,
+     `cov_fn_name`, `report_logic`, `track_optional_chain`, `ignore_class_methods`,
+     `eager_remapper`) and use `finalize_coverage_map(filename, transform, options)`.
 2. **`src/lib.rs`** — re-export `instrument_program_ast` and `InstrumentAstResult`.
 3. **`Cargo.toml`** — made self-contained: literal `[package]` fields (was
    `*.workspace = true`), sibling deps repointed to crates.io, `[lints]`,
@@ -39,19 +42,11 @@ unmodified from crates.io.
 
 ### Bug fix (not in `expose-transform.patch`)
 
-4. **`src/transform.rs`** (`exit_statements`) — upstream drops the per-declarator
-   statement counter for an **exported** fn/arrow/class-init declarator
-   (`export const f = () => …`). The counter is hoisted to a sibling before the
-   enclosing `VariableDeclaration`, but the body statement is the wrapping
-   `ExportNamedDeclaration` (span starts at `export`, not `const`), so the
-   offsets never match and `++s[N]` is silently dropped — the declaration is
-   never counted (coverage reports 1/2 instead of 2/2). Fix: when matching a
-   pending insertion, also accept an `ExportNamedDeclaration`'s inner declaration
-   start, so the counter lands before the whole `export` statement (matching
-   istanbul's `cov.s[N]++; export const f = …`). Re-apply on re-sync; consider
-   upstreaming.
+> Note: the exported-fn-init-declarator counter fix we previously carried here was
+> **upstreamed in v0.8.2** (the `ExportNamedDeclarationDeclaration` ancestor branch in
+> `transform.rs`'s declarator handling), so it is no longer a local change.
 
-5. **`src/transform.rs`** (`generate_preamble_source`) — splice istanbul's
+4. **`src/transform.rs`** (`generate_preamble_source`) — splice istanbul's
    `_coverageSchema` marker (bare-identifier key `_coverageSchema:"1a1c01bbd47…"`)
    into the head of the emitted `coverageData` object literal. Upstream's preamble
    embeds the `FileCoverage` JSON with no schema key, so
@@ -61,14 +56,15 @@ unmodified from crates.io.
    The key must be a JS identifier (not a JSON string), so it's spliced into the
    literal source. Re-apply on re-sync; consider upstreaming.
 
-6. **`src/transform.rs`** (`enter_call_expression`) — for an OPTIONAL call
+5. **`src/transform.rs`** (`enter_call_expression`) — for an OPTIONAL call
    (`obj?.method?.()`) whose callee is a member expression, do NOT wrap the callee
    with the `cov_oc` link observer. Wrapping it (`cov_oc(obj?.method, id)?.()`)
    evaluates the callee to a detached function value, so the method runs with
    `this === undefined` (R22 — broke any instrumented `obj?.m?.()` using `this`).
    The member link's own branch already records the object's short-circuit, so the
    call-link counter is dropped for method calls; a non-member callee (`fn?.()`)
-   has no receiver to lose and is still wrapped. Re-apply on re-sync.
+   has no receiver to lose and is still wrapped. **Re-apply on re-sync — upstream
+   v0.9.0 reverted to wrapping all callees, so this must be re-added each bump.**
 
    **Known coverage gap (intentional):** because the skip keys off *any* member-
    expression callee, `obj.method?.()` — where the member is non-optional and the
@@ -80,7 +76,7 @@ unmodified from crates.io.
    one optional-call *branch* counter is missing. Recording it correctly would need
    a receiver-preserving rewrite (a temp-bound receiver), not the `cov_oc` wrapper.
 
-7. **`src/transform.rs`** (`generate_preamble_source`) — `debug_assert!` that the
+6. **`src/transform.rs`** (`generate_preamble_source`) — `debug_assert!` that the
    serialized coverage JSON starts with `{` before the `_coverageSchema` splice, so
    the else-branch (which would emit the preamble WITHOUT the marker, silently
    re-breaking never-imported-file coverage) can't be taken unnoticed in test builds.
@@ -115,11 +111,22 @@ member (it builds only as a patch target).
 
 1. `git clone --branch <new-tag> https://github.com/fallow-rs/oxc-coverage-instrument`
 2. Copy `crates/oxc-coverage-instrument/src` over `vendor/oxc-coverage-instrument/src`.
-3. Re-apply `expose-transform.patch` (or re-add `instrument_program_ast` +
-   `InstrumentAstResult` + the lib.rs re-export by hand — it is ~70 lines mirroring
-   `instrument()` minus its codegen tail). The patch's `@@` line numbers track
-   upstream v0.7.6; on a version bump re-apply by hand, then regenerate the patch
+3. Re-apply the **3 transform.rs patches** by hand (items 4–6 above: the
+   `_coverageSchema` splice, the R22 member-callee skip — upstream keeps reverting it,
+   and the `debug_assert`) plus the `instrument_program_ast`/`InstrumentAstResult`
+   additions + the lib.rs re-export (`expose-transform.patch` is the reference). Keep
+   `instrument_program_ast`'s `TransformInit` fields and coverage-map call
+   (`finalize_coverage_map`) in lockstep with the current `instrument()` (see item 1).
+   The patch's `@@` line numbers track the pinned tag; regenerate it after re-applying
    with `diff -u <upstream>/src/{lib,instrument}.rs vendor/oxc-coverage-instrument/src/{lib,instrument}.rs`.
 4. Refresh the self-contained `Cargo.toml` (bump oxc/sibling versions to match the
-   new tag's manifest), then bump `oxc_* = "=<new>"` across our crates in lockstep.
-5. Update the tag/commit above.
+   new tag's manifest). If the new tag changes its required oxc version, bump
+   `oxc_* = "=<new>"` across our crates in lockstep too (v0.9.0 still uses 0.126).
+5. **Bump the version requirement in the root `Cargo.toml`'s `[workspace.dependencies]`
+   `oxc_coverage_instrument = "<new>"`** to match the vendored crate's version.
+   Otherwise the `[patch.crates-io]` entry doesn't satisfy the requirement and Cargo
+   **silently ignores the patch**, pulling the unpatched crate from crates.io (you'll
+   get "no `instrument_program_ast` in the root").
+6. Update the tag/commit above. Re-verify the istanbul coverage differential
+   (`crates/ng-transform-napi/test/coverage-differential.test.mts`) — upstream counter
+   refactors can shift counts.

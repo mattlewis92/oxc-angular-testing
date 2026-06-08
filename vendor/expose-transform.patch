@@ -1,4 +1,4 @@
---- a/src/lib.rs (upstream v0.7.6)
+--- a/src/lib.rs (upstream v0.9.0)
 +++ b/src/lib.rs (vendored)
 @@ -36,6 +36,8 @@
  
@@ -8,13 +8,16 @@
 +    InstrumentAstResult, instrument_program_ast,
  };
  pub use oxc_coverage_source_maps::{
-     RemapOptions, SourceMapStore, remap_coverage, remap_coverage_map,
---- a/src/instrument.rs (upstream v0.7.6)
+     PositionRemapper, RemapOptions, SourceMapStore, remap_coverage, remap_coverage_map,
+--- a/src/instrument.rs (upstream v0.9.0)
 +++ b/src/instrument.rs (vendored)
-@@ -353,6 +353,85 @@
-     })
- }
- 
+@@ -410,7 +410,87 @@
+         Err(InstrumentError::ParseError(
+             parsed.errors.iter().map(|e| format!("{e}")).collect::<Vec<_>>().join("; "),
+         ))
++    }
++}
++
 +// ============================================================================
 +// VENDOR PATCH (oxc-angular-testing): see ../../expose-transform.patch.
 +// `instrument_program_ast` (below) is the only addition to this file — the
@@ -55,7 +58,7 @@
 +        return Err(InstrumentError::InvalidCoverageVariable(
 +            options.coverage_variable.clone(),
 +        ));
-+    }
+     }
 +    let (pragmas, unhandled) = PragmaMap::from_program(program, source);
 +    if pragmas.ignore_file {
 +        let empty = empty_coverage_result(filename, source, unhandled);
@@ -71,13 +74,14 @@
 +        source,
 +        cov_fn_name: &cov_fn_name,
 +        report_logic: options.report_logic,
++        track_optional_chain: options.track_optional_chain,
 +        ignore_class_methods: options.ignore_class_methods.clone(),
++        eager_remapper: eager_remapper(options),
 +    });
 +    let state = CoverageState { pragmas };
 +    let _scoping = traverse_mut(&mut transform, allocator, program, scoping, state);
 +
-+    let coverage_map =
-+        build_coverage_map(filename, transform, options.input_source_map.as_deref());
++    let coverage_map = finalize_coverage_map(filename, transform, options);
 +    let coverage_json = serialize_coverage_map(&coverage_map);
 +    let coverage_hash = djb31_hex(&coverage_json);
 +    let preamble = generate_preamble_source(&PreambleInputs {
@@ -92,8 +96,6 @@
 +        coverage_map_json: coverage_json,
 +        preamble,
 +    })
-+}
-+
- /// Run `oxc_transformer`'s TypeScript-strip pass on the parsed program in
- /// place. Returns the updated `Scoping` produced by the transformer (the
- /// semantic state may change as type-only nodes are removed). Surviving nodes
+ }
+ 
+ fn empty_coverage_result(

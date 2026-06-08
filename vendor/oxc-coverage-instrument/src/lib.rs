@@ -40,7 +40,7 @@ pub use instrument::{
     InstrumentAstResult, instrument_program_ast,
 };
 pub use oxc_coverage_source_maps::{
-    RemapOptions, SourceMapStore, remap_coverage, remap_coverage_map,
+    PositionRemapper, RemapOptions, SourceMapStore, remap_coverage, remap_coverage_map,
     remap_coverage_map_with_loader, remap_coverage_map_with_loader_and_options,
     remap_coverage_map_with_options, remap_coverage_with_loader,
     remap_coverage_with_loader_and_options, remap_coverage_with_options,
