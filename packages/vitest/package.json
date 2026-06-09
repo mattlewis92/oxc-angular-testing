@@ -16,6 +16,10 @@
     "url": "git+https://github.com/mattlewis92/oxc-angular-testing.git",
     "directory": "packages/vitest"
   },
+  "homepage": "https://github.com/mattlewis92/oxc-angular-testing#readme",
+  "bugs": {
+    "url": "https://github.com/mattlewis92/oxc-angular-testing/issues"
+  },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
