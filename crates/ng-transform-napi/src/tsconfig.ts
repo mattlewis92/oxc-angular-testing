@@ -42,6 +42,19 @@ export function scriptTargetToString(target: number): string {
   return SCRIPT_TARGET[target] ?? 'esnext';
 }
 
+// Memoized per resolved absolute tsconfig path, at MODULE scope. jest 30 creates
+// a fresh ScriptTransformer (→ createTransformer()) per test file, so any cache
+// living inside the transformer closure is recreated per suite and never hits;
+// this module is loaded once per jest worker process and tsconfigs don't change
+// mid-run, so module scope is the lifetime that actually amortizes the work.
+const derivedOptionsCache = new Map<string, DerivedTransformOptions>();
+
+// Artifacts of suppressing the input-file fields below (verified against TS 5.9):
+// `files: []` → TS18002 "The 'files' list in config file is empty"; no files +
+// `include: []` → TS18003 "No inputs were found in config file". Both are
+// expected consequences of only deriving compilerOptions, not real errors.
+const NO_INPUTS_DIAGNOSTICS = new Set([18002, 18003]);
+
 /**
  * Derive transform options (target, module format, decorator flags,
  * `useDefineForClassFields`) from a project tsconfig. Requires `typescript` to
@@ -61,6 +74,8 @@ export function deriveTransformOptions(
   const resolved = path.isAbsolute(tsconfigPath)
     ? tsconfigPath
     : path.resolve(cwd, tsconfigPath);
+  const cached = derivedOptionsCache.get(resolved);
+  if (cached) return cached;
   const configFile = ts.readConfigFile(resolved, ts.sys.readFile);
   if (configFile.error) {
     // A tsconfig was explicitly requested but can't be read — missing file or
@@ -76,16 +91,25 @@ export function deriveTransformOptions(
         `If the path contains an unexpanded "<rootDir>" token, resolve it before it reaches the transform.`,
     );
   }
+  // Only `parsed.options` is consumed, but parseJsonConfigFileContent also
+  // expands the config's `files`/`include` globs (getFileNamesFromConfigSpecs →
+  // a recursive readdir walk of the whole project tree) just to build a file
+  // list we throw away. Suppress the input-file fields so no enumeration
+  // happens — the `extends` chain and compilerOptions resolution are unaffected.
   const parsed = ts.parseJsonConfigFileContent(
-    configFile.config,
+    { ...(configFile.config as object), files: [], include: [], exclude: [] },
     ts.sys,
     path.dirname(resolved),
   );
   // parseJsonConfigFileContent returns best-effort options even when the config
   // mis-parses (bad `extends`, invalid option values). Those land in `parsed.errors`
   // and were previously ignored, yielding partial options silently. A referenced
-  // tsconfig that doesn't parse is a misconfiguration — fail loudly.
-  const parseErrors = parsed.errors.filter((d) => d.category === ts.DiagnosticCategory.Error);
+  // tsconfig that doesn't parse is a misconfiguration — fail loudly. (The
+  // "no inputs" diagnostics our own files/include suppression provokes are
+  // expected and skipped.)
+  const parseErrors = parsed.errors.filter(
+    (d) => d.category === ts.DiagnosticCategory.Error && !NO_INPUTS_DIAGNOSTICS.has(d.code),
+  );
   if (parseErrors.length > 0) {
     const detail = parseErrors
       .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n'))
@@ -149,5 +173,6 @@ export function deriveTransformOptions(
       if (co.jsxImportSource) options.jsxImportSource = co.jsxImportSource;
     }
   }
+  derivedOptionsCache.set(resolved, options);
   return options;
 }
