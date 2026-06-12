@@ -1,0 +1,12 @@
+// Real sass features (variables + nesting) so the e2e test proves vite's scss
+// pipeline compiled this file — plain CSS passthrough would not resolve these.
+$card-padding: 12px;
+$title-color: rgb(0, 128, 0);
+
+.card {
+  padding: $card-padding;
+
+  .card-title {
+    color: $title-color;
+  }
+}

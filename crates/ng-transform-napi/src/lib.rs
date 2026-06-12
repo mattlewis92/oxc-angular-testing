@@ -47,6 +47,19 @@ pub struct TransformOptions {
     /// ECMAScript target for syntax downleveling (e.g. `"es2017"`, `"esnext"`).
     /// Derive from tsconfig `target`. Default `"esnext"`.
     pub target: Option<String>,
+    /// Keep component styles instead of stripping them (default `false`).
+    /// `styleUrl`/`styleUrls` become default imports (`"esm"`) or `require(...)`
+    /// calls (`"commonjs"`), merged after any inline `styles` — the bundler's
+    /// CSS pipeline (e.g. vite + sass) compiles them. No CSS is compiled by the
+    /// transform itself. See `keepStylesQuery` for the query parameter that
+    /// makes the bundler return the CSS as a string.
+    pub keep_styles: Option<bool>,
+    /// Query parameter appended to each style URL rewritten under `keepStyles`:
+    /// e.g. `"inline"` turns `./a.scss` into `./a.scss?inline` (`&inline` when
+    /// the URL already has a query), which makes vite return the compiled CSS
+    /// as a string. Default: unset — URLs are emitted verbatim. The vitest
+    /// plugin passes `"inline"`.
+    pub keep_styles_query: Option<String>,
     /// Master switch for TS→JS + decorator lowering (default `true`; set `false`
     /// only to inspect the pre-lowering TypeScript AST).
     pub lower: Option<bool>,
@@ -107,6 +120,8 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
             pragma_frag: options.jsx_fragment_factory,
         },
         target: options.target.unwrap_or(defaults.target),
+        keep_styles: options.keep_styles.unwrap_or(defaults.keep_styles),
+        keep_styles_query: options.keep_styles_query.or(defaults.keep_styles_query),
         lower: options.lower.unwrap_or(defaults.lower),
         coverage: options.coverage.unwrap_or(defaults.coverage),
         coverage_variable: options.coverage_variable.or(defaults.coverage_variable),

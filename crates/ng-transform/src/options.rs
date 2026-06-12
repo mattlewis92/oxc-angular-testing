@@ -81,6 +81,22 @@ pub struct TransformOptions {
     /// `false` only to inspect the Angular passes' output as TypeScript
     /// (used by the crate's own snapshot tests); the result is not executable.
     pub lower: bool,
+    /// Keep component styles instead of stripping them (the default). Style
+    /// references are rewritten so the bundler's CSS pipeline compiles them:
+    /// `styleUrl`/`styleUrls` entries become default imports (ESM) or
+    /// `require(...)` calls (CommonJS) and the property is replaced with
+    /// `styles: [...]`; existing inline `styles` are preserved and merged ahead
+    /// of the URL-derived entries (Angular's own resolution order). No CSS is
+    /// compiled here — that is delegated to the consumer (vite), optionally via
+    /// [`keep_styles_query`](Self::keep_styles_query).
+    pub keep_styles: bool,
+    /// Query parameter appended to each style URL rewritten under
+    /// [`keep_styles`](Self::keep_styles): e.g. `"inline"` turns
+    /// `./a.scss` into `./a.scss?inline` (`&inline` when the URL already has a
+    /// query), which makes vite return the compiled CSS as a string. `None`
+    /// (the default) emits the URL verbatim. The vitest plugin passes
+    /// `"inline"`.
+    pub keep_styles_query: Option<String>,
     /// Instrument the output for istanbul-compatible coverage in the same pass.
     pub coverage: bool,
     /// Global coverage variable name (default `__coverage__`).
@@ -100,6 +116,8 @@ impl Default for TransformOptions {
             hoist_jest_mock: false,
             jsx: JsxConfig::default(),
             target: "esnext".to_string(),
+            keep_styles: false,
+            keep_styles_query: None,
             lower: true,
             coverage: false,
             coverage_variable: None,

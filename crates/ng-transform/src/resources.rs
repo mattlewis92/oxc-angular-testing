@@ -7,7 +7,12 @@
 //! - `templateUrl: './x.html'` → `template: require('./x.html')` (require mode)
 //!   or a hoisted `import __NG_CLI_RESOURCE__N from './x.html'` + `template:
 //!   __NG_CLI_RESOURCE__N` (import mode).
-//! - `styleUrls`, `styleUrl`, `styles`, `moduleId` → removed.
+//! - `styleUrls`, `styleUrl`, `styles`, `moduleId` → removed (default), or —
+//!   with `keep_styles` — style URLs are rewritten to imports/requires (with an
+//!   optional query parameter, e.g. vite's `?inline`, so the bundler compiles
+//!   the CSS and yields a string) and merged with any inline `styles` into a
+//!   single `styles: [...]` (inline entries first, URL entries after, matching
+//!   Angular's `resolveComponentResources` order). `moduleId` is still removed.
 //!
 //! Detection of the `@angular/core` origin is by import tracking (named
 //! specifiers, including aliases). The TypeScript original uses the type
@@ -17,20 +22,29 @@ use std::collections::HashSet;
 
 use oxc_ast::AstBuilder;
 use oxc_ast::ast::{
-    Argument, Class, Decorator, Expression, ImportDeclarationSpecifier, ImportOrExportKind,
-    ObjectExpression, ObjectProperty, ObjectPropertyKind, Program, PropertyKey, Statement,
-    TSTypeParameterInstantiation, WithClause,
+    Argument, ArrayExpressionElement, Class, Decorator, Expression, ImportDeclarationSpecifier,
+    ImportOrExportKind, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program, PropertyKey,
+    Statement, TSTypeParameterInstantiation, WithClause,
 };
 use oxc_span::SPAN;
 use oxc_traverse::{Traverse, TraverseCtx};
 
 const RESOURCE_PREFIX: &str = "__NG_CLI_RESOURCE__";
+const STYLE_PREFIX: &str = "__oxc_ng_style_";
 const ANGULAR_CORE: &str = "@angular/core";
 
 /// State for the resource transform.
 pub struct ResourceTransform {
     /// Emit a hoisted top-level `import` instead of `require(...)`.
     use_import: bool,
+    /// Keep styles: rewrite `styleUrl(s)` to imports/requires instead of
+    /// stripping all style metadata.
+    keep_styles: bool,
+    /// Query parameter appended to each rewritten style URL (e.g. `inline` →
+    /// `./a.scss?inline`, or `&inline` when the URL already has a query), so a
+    /// bundler can return the compiled CSS as a string. `None` emits the URL
+    /// verbatim.
+    style_query: Option<String>,
     /// Local identifier names that refer to `Component` from `@angular/core`.
     component_locals: HashSet<String>,
     /// Local names of `import * as ng from '@angular/core'` namespace imports, so
@@ -40,19 +54,40 @@ pub struct ResourceTransform {
     pending_imports: Vec<(String, String)>,
     /// Counter for `__NG_CLI_RESOURCE__N` names.
     counter: usize,
+    /// Counter for `__oxc_ng_style_N__` names (shared across all components in
+    /// the file, so naming is stable and collision-free within the module).
+    style_counter: usize,
+    /// Prefix for hoisted style identifiers. Starts as [`STYLE_PREFIX`]; if the
+    /// source text already contains that prefix anywhere (a user binding could
+    /// collide), underscores are prepended until it no longer occurs — cheap,
+    /// conservative, and deterministic (same input → same names).
+    style_prefix: String,
     /// Whether this pass changed anything (resources or imports).
     pub changed: bool,
 }
 
 impl ResourceTransform {
     #[must_use]
-    pub fn new(use_import: bool) -> Self {
+    pub fn new(
+        use_import: bool,
+        keep_styles: bool,
+        style_query: Option<String>,
+        source: &str,
+    ) -> Self {
+        let mut style_prefix = STYLE_PREFIX.to_string();
+        while source.contains(&style_prefix) {
+            style_prefix.insert(0, '_');
+        }
         Self {
             use_import,
+            keep_styles,
+            style_query,
             component_locals: HashSet::new(),
             component_namespaces: HashSet::new(),
             pending_imports: Vec::new(),
             counter: 0,
+            style_counter: 0,
+            style_prefix,
             changed: false,
         }
     }
@@ -105,9 +140,66 @@ impl<'a> ResourceTransform {
         }
     }
 
+    /// The expression a single style URL becomes under `keep_styles`: the URL is
+    /// normalized, given the configured query parameter (if any — e.g. `inline`
+    /// → `?inline`, or `&inline` if the URL already has a query), and turned
+    /// into a hoisted default import's identifier (import mode) or an in-place
+    /// `require(...)` call (require mode). The bundler's CSS pipeline compiles
+    /// the stylesheet; a query like vite's `inline` makes the default export
+    /// the CSS text.
+    fn style_value(&mut self, url: &str, ast: AstBuilder<'a>) -> Expression<'a> {
+        let mut specifier = normalize_url(url);
+        if let Some(query) = &self.style_query {
+            specifier.push(if specifier.contains('?') { '&' } else { '?' });
+            specifier.push_str(query);
+        }
+        if self.use_import {
+            let var = format!("{}{}__", self.style_prefix, self.style_counter);
+            self.style_counter += 1;
+            let arena_var = ast.allocator.alloc_str(&var);
+            self.pending_imports.push((var, specifier));
+            ast.expression_identifier(SPAN, arena_var)
+        } else {
+            let arena_src = ast.allocator.alloc_str(&specifier);
+            let src = ast.expression_string_literal(SPAN, arena_src, None);
+            let callee = ast.expression_identifier(SPAN, "require");
+            let mut args = ast.vec();
+            args.push(Argument::from(src));
+            ast.expression_call(
+                SPAN,
+                callee,
+                None::<TSTypeParameterInstantiation>,
+                args,
+                false,
+            )
+        }
+    }
+
     /// Rewrite the `@Component({...})` metadata object: inline `templateUrl`,
-    /// strip styles + `moduleId`.
+    /// strip `moduleId`, and strip (default) or rewrite (`keep_styles`) the
+    /// style metadata.
     fn process_metadata(&mut self, obj: &mut ObjectExpression<'a>, ast: AstBuilder<'a>) {
+        // `keep_styles`: collect the static style URLs up front. If any style URL
+        // is dynamic — or inline `styles` has a shape we cannot merge into — the
+        // style properties are left untouched (same policy as a dynamic
+        // `templateUrl`), since a partial rewrite would change behavior.
+        // `None` = strip (the keep_styles: false default); `Some(plan)` = keep.
+        let style_plan = self.keep_styles.then(|| plan_styles(obj));
+        // URL-derived style expressions, in declaration order. Built before the
+        // rebuild loop so the merged `styles` array can land at the position of
+        // the first style-related property.
+        let url_styles: Vec<Expression<'a>> = match &style_plan {
+            Some(StylePlan::Rewrite { urls }) => {
+                urls.iter().map(|u| self.style_value(u, ast)).collect()
+            }
+            _ => Vec::new(),
+        };
+
+        // Index (in the rebuilt property list) of the first style-related
+        // property, and the inline `styles` elements captured during the rebuild.
+        let mut styles_slot: Option<usize> = None;
+        let mut inline_elements = ast.vec::<ArrayExpressionElement<'a>>();
+
         let old = std::mem::replace(&mut obj.properties, ast.vec());
         for prop in old {
             let ObjectPropertyKind::ObjectProperty(mut p) = prop else {
@@ -123,13 +215,137 @@ impl<'a> ResourceTransform {
                     }
                     obj.properties.push(ObjectPropertyKind::ObjectProperty(p));
                 }
-                Some("styleUrls" | "styleUrl" | "styles" | "moduleId") => {
-                    // Dropped entirely (styles are not exercised under test).
+                Some("moduleId") => {
+                    // Dropped in both modes (JIT has no module-relative loading).
                     self.changed = true;
                 }
+                Some(key @ ("styleUrls" | "styleUrl" | "styles")) => match &style_plan {
+                    None => {
+                        // Default: dropped entirely (styles are not exercised
+                        // under jsdom-style tests).
+                        self.changed = true;
+                    }
+                    Some(StylePlan::Untouched | StylePlan::InlineOnly) => {
+                        // Untouched: a dynamic URL / un-mergeable inline shape —
+                        // leave every style property as written. InlineOnly:
+                        // nothing to rewrite, inline `styles` pass through.
+                        obj.properties.push(ObjectPropertyKind::ObjectProperty(p));
+                    }
+                    Some(StylePlan::Rewrite { .. }) => {
+                        styles_slot.get_or_insert(obj.properties.len());
+                        if key == "styles" {
+                            // Take ownership of the value (the property itself is
+                            // dropped) so its elements can be spliced through.
+                            let value =
+                                std::mem::replace(&mut p.value, ast.expression_null_literal(SPAN));
+                            collect_inline_elements(value, &mut inline_elements, ast);
+                        }
+                        self.changed = true;
+                    }
+                },
                 _ => obj.properties.push(ObjectPropertyKind::ObjectProperty(p)),
             }
         }
+
+        if let Some(slot) = styles_slot {
+            // Merged `styles: [...]`: inline entries first, URL-derived entries
+            // after — Angular's `resolveComponentResources` appends fetched
+            // styleUrl styles to the end of the inline `styles` array.
+            inline_elements.extend(url_styles.into_iter().map(ArrayExpressionElement::from));
+            let array = ast.expression_array(SPAN, inline_elements);
+            let key = PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "styles"));
+            let prop = ast.object_property_kind_object_property(
+                SPAN,
+                oxc_ast::ast::PropertyKind::Init,
+                key,
+                array,
+                false,
+                false,
+                false,
+            );
+            obj.properties.insert(slot, prop);
+        }
+    }
+}
+
+/// How `keep_styles` will treat a component's style metadata.
+enum StylePlan {
+    /// Inline `styles` only (no `styleUrl`/`styleUrls`): preserved verbatim.
+    InlineOnly,
+    /// Rewrite: replace the style properties with one merged `styles: [...]`
+    /// whose URL-derived entries come from these static URLs.
+    Rewrite { urls: Vec<String> },
+    /// A dynamic style URL or un-mergeable inline `styles` shape: leave every
+    /// style property untouched.
+    Untouched,
+}
+
+/// Decide the [`StylePlan`] for a metadata object (immutable pre-pass).
+fn plan_styles(obj: &ObjectExpression<'_>) -> StylePlan {
+    let mut urls: Vec<String> = Vec::new();
+    let mut has_urls = false;
+    let mut inline_mergeable = true;
+    for prop in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            continue;
+        };
+        match key_name(&p.key) {
+            Some("styleUrl") => {
+                has_urls = true;
+                match static_string_value(&p.value) {
+                    Some(url) => urls.push(url),
+                    None => return StylePlan::Untouched,
+                }
+            }
+            Some("styleUrls") => {
+                has_urls = true;
+                let Expression::ArrayExpression(arr) = &p.value else {
+                    return StylePlan::Untouched;
+                };
+                for element in &arr.elements {
+                    match element.as_expression().and_then(static_string_value) {
+                        Some(url) => urls.push(url),
+                        None => return StylePlan::Untouched,
+                    }
+                }
+            }
+            Some("styles") => {
+                // Mergeable shapes: an array literal (its elements are spliced
+                // through) or a single string/template literal (Angular accepts
+                // `styles: '…'` and normalizes it to a one-element array).
+                inline_mergeable = matches!(
+                    &p.value,
+                    Expression::ArrayExpression(_)
+                        | Expression::StringLiteral(_)
+                        | Expression::TemplateLiteral(_)
+                );
+            }
+            _ => {}
+        }
+    }
+    if !has_urls {
+        return StylePlan::InlineOnly;
+    }
+    if !inline_mergeable {
+        return StylePlan::Untouched;
+    }
+    StylePlan::Rewrite { urls }
+}
+
+/// Splice an inline `styles` value into `elements`: array literals contribute
+/// their elements (spreads included), a single string/template literal becomes
+/// one element (Angular's `styles: '…'` normalization).
+fn collect_inline_elements<'a>(
+    value: Expression<'a>,
+    elements: &mut oxc_allocator::Vec<'a, ArrayExpressionElement<'a>>,
+    ast: AstBuilder<'a>,
+) {
+    match value {
+        Expression::ArrayExpression(mut arr) => {
+            let inner = std::mem::replace(&mut arr.elements, ast.vec());
+            elements.extend(inner);
+        }
+        other => elements.push(ArrayExpressionElement::from(other)),
     }
 }
 

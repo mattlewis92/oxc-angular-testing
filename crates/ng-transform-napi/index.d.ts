@@ -53,6 +53,23 @@ export interface TransformOptions {
    */
   target?: string
   /**
+   * Keep component styles instead of stripping them (default `false`).
+   * `styleUrl`/`styleUrls` become default imports (`"esm"`) or `require(...)`
+   * calls (`"commonjs"`), merged after any inline `styles` — the bundler's
+   * CSS pipeline (e.g. vite + sass) compiles them. No CSS is compiled by the
+   * transform itself. See `keepStylesQuery` for the query parameter that
+   * makes the bundler return the CSS as a string.
+   */
+  keepStyles?: boolean
+  /**
+   * Query parameter appended to each style URL rewritten under `keepStyles`:
+   * e.g. `"inline"` turns `./a.scss` into `./a.scss?inline` (`&inline` when
+   * the URL already has a query), which makes vite return the compiled CSS
+   * as a string. Default: unset — URLs are emitted verbatim. The vitest
+   * plugin passes `"inline"`.
+   */
+  keepStylesQuery?: string
+  /**
    * Master switch for TS→JS + decorator lowering (default `true`; set `false`
    * only to inspect the pre-lowering TypeScript AST).
    */

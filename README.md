@@ -52,6 +52,26 @@ Coverage auto-enables when vitest runs with the `istanbul` provider
 (`test.coverage.provider: 'istanbul'`); pass `oxcAngular({ coverage: true | false })`
 to force it.
 
+#### Component styles (`keepStyles`)
+
+By default component styles are **stripped** (`styles`, `styleUrl`, `styleUrls`
+removed) — matching jest-preset-angular, and right for node/jsdom unit tests
+where layout doesn't exist anyway. Under vitest **browser mode**, real-layout
+tests need styles applied, so the plugin keeps them there: when `keepStyles` is
+not set, it is decided per Vite environment — styles are kept for the `client`
+environment (browser mode) and stripped for `ssr` (node/jsdom projects). Pass
+`oxcAngular({ keepStyles: true | false })` to force one behavior everywhere.
+
+When styles are kept, the transform does **not** compile any CSS itself —
+that's vite's job (an explicit non-goal: no sass in the transform).
+`styleUrl`/`styleUrls` entries are rewritten to hoisted default imports with
+the `inline` query the plugin passes (e.g. `import __oxc_ng_style_0__ from
+'./a.scss?inline'`), which vite's CSS pipeline (with your sass/less/postcss
+config) compiles to a CSS string, and the decorator property is replaced with
+`styles: [__oxc_ng_style_0__]` — which Angular JIT accepts as-is. Inline
+`styles` are preserved and merged ahead of the URL-derived entries, matching
+Angular's own resolution order.
+
 ### Jest (ESM)
 
 ```js
@@ -109,6 +129,7 @@ decorator/class helpers the lowering emits.
 | --- | --- |
 | `templateUrl` → `template` (`require`/`import` per `module`) | ✅ `resources.rs` |
 | `styleUrls` / `styleUrl` / `styles` / `moduleId` stripping | ✅ `resources.rs` |
+| `keepStyles`: style URLs → `?inline` imports, merged `styles: [...]` (vitest browser mode) | ✅ `resources.rs` |
 | Constructor/decorator downleveling (`ctorParameters`/`propDecorators`) | ✅ `jit_transform.rs` |
 | Signal initializer-API decorators (`input()`/`output()`/`model()`/queries) | ✅ `jit_transform.rs` |
 | TS → JS + legacy decorator lowering, ES `target` downleveling | ✅ via `oxc_transformer` |
@@ -136,6 +157,18 @@ lowering, coverage) plus the jest/vitest integration suites.
 - **`useDefineForClassFields: false`** (the default, Angular's setting) emits class
   fields as plain assignments (oxc `set_public_class_fields` +
   `remove_class_fields_without_initializer`).
+- **`keepStyles`** (default `false`) keeps component styles instead of stripping
+  them, for tests that exercise real layout (vitest browser mode). Style URLs
+  become default imports (ESM) or `require(...)` calls (CommonJS) — the
+  bundler's CSS pipeline owns compilation (no sass in the transform, by
+  design). **`keepStylesQuery`** (default unset — URLs emitted verbatim) names
+  a query parameter to append to each rewritten URL: the vitest plugin
+  hard-codes `'inline'`, so vite yields the CSS text, which Angular JIT accepts
+  in `styles: [...]` (URLs that already carry a query get `&inline`). The
+  hoisted identifiers (`__oxc_ng_style_N__`) are deterministic and dodge user
+  bindings. Note the CommonJS form is emitted for completeness: plain jest has
+  no CSS pipeline to resolve `require('./a.scss?inline')`, so the jest plugin
+  does not expose the option — `keepStyles` is a vitest (vite) feature.
 - **Content stringification** — files matching `stringifyContentPathRegex`
   (default `\.(html|svg)$`) are returned as a string module (their raw content)
   rather than compiled, so component `templateUrl` HTML and inline SVG imports

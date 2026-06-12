@@ -94,12 +94,26 @@ export interface OxcAngularOptions {
    */
   stringifyContentPathRegex?: RegExp;
   /**
+   * Keep component styles instead of stripping them. `styleUrl`/`styleUrls`
+   * are rewritten to `?inline` default imports, so Vite's CSS pipeline (with
+   * your sass/less/postcss config) compiles them and Angular JIT receives the
+   * CSS text in `styles: [...]`. When omitted, this is decided per Vite
+   * environment: styles are kept for the `client` environment (vitest browser
+   * mode, where real-layout tests need them) and stripped everywhere else
+   * (`ssr` — node/jsdom projects, matching jest-preset-angular). Pass a
+   * boolean to force one behavior for all environments.
+   */
+  keepStyles?: boolean;
+  /**
    * Override individual transform options forwarded to the Rust transform.
    * `module` is intentionally excluded (Vitest always runs native ESM, so this
-   * plugin only ever emits ESM), as is `coverage` (controlled by the dedicated
-   * top-level `coverage` option + the auto-detected istanbul provider).
+   * plugin only ever emits ESM), as are `coverage` and `keepStyles`
+   * (controlled by the dedicated top-level options) and `keepStylesQuery`
+   * (always `'inline'` — the query Vite's CSS pipeline understands).
    */
-  transform?: Partial<Omit<TransformOptions, 'module' | 'coverage'>>;
+  transform?: Partial<
+    Omit<TransformOptions, 'module' | 'coverage' | 'keepStyles' | 'keepStylesQuery'>
+  >;
 }
 
 // Vitest augments Vite's resolved config with a `test` field; type the slice we
@@ -169,6 +183,14 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
           // `transform` spread, and `coverage` is excluded from `transform`'s type, so
           // there is no second, inconsistent knob.
           coverage: options.coverage ?? autoCoverage,
+          // Styles: an explicit boolean wins; otherwise keep styles only in the
+          // `client` Vite environment — vitest browser mode transforms test
+          // modules through it, while node/jsdom projects use `ssr`. The
+          // fallback (no environment) strips, matching historical behavior.
+          keepStyles: options.keepStyles ?? this.environment?.name === 'client',
+          // Vite returns the compiled CSS as a string for `?inline` imports —
+          // hard-coded here since this plugin always delegates CSS to Vite.
+          keepStylesQuery: 'inline',
           // Vitest runs native ESM: force `esm` last so neither the
           // tsconfig-derived options nor an explicit override can select CJS.
           module: 'esm',

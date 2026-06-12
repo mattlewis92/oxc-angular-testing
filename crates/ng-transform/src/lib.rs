@@ -119,7 +119,12 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             .build(&program)
             .semantic
             .into_scoping();
-        let mut resources = ResourceTransform::new(options.is_esm());
+        let mut resources = ResourceTransform::new(
+            options.is_esm(),
+            options.keep_styles,
+            options.keep_styles_query.clone(),
+            source,
+        );
         traverse_mut(&mut resources, &allocator, &mut program, scoping, ());
     }
     if options.jit_transforms {

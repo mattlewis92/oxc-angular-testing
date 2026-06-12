@@ -45,6 +45,10 @@ jobs:
         run: pnpm --filter @oxc-angular-testing/transform test
       - name: Test vitest plugin
         run: pnpm --filter @oxc-angular-testing/vitest test
+      - name: Install chromium for the browser-mode e2e
+        run: pnpm --filter @oxc-angular-testing/vitest exec playwright install --with-deps chromium
+      - name: Test vitest plugin (browser mode, keepStyles e2e)
+        run: pnpm --filter @oxc-angular-testing/vitest test:browser
       - name: Test jest plugin
         run: pnpm --filter @oxc-angular-testing/jest test
 
