@@ -27,10 +27,12 @@ export interface TransformOptions {
    */
   jitTransforms?: boolean
   /**
-   * Hoist `jest.mock()` / `jest.unmock()` / etc. above imports
-   * (babel-plugin-jest-hoist). Default `false`; the jest plugin enables it.
+   * Hoist mock-registration calls (`mock()` / `unmock()` / …) above imports
+   * (babel-plugin-jest-hoist). `"jest"` hoists `jest.*` (global or
+   * `@jest/globals`); `"vi"` hoists `vi.*` (global or `vitest`). Omitted /
+   * unknown (default) hoists nothing. The jest plugin sets `"jest"`.
    */
-  hoistJestMock?: boolean
+  hoistMock?: string
   /**
    * JSX runtime for `.tsx`/`.jsx` (mixed Angular + React): `"automatic"`
    * (default) or `"classic"`. Derive from tsconfig `jsx`.

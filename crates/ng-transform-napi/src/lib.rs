@@ -7,7 +7,8 @@
 
 use napi_derive::napi;
 use ng_transform::{
-    JsxConfig, JsxRuntime, ModuleKind, TransformOptions as NgOptions, transform as ng_transform,
+    JsxConfig, JsxRuntime, MockFramework, ModuleKind, TransformOptions as NgOptions,
+    transform as ng_transform,
 };
 
 /// Options forwarded to the Rust transform. All fields are optional; omitted
@@ -29,9 +30,11 @@ pub struct TransformOptions {
     /// Run the Angular JIT transforms (downlevel decorators + signal initializer
     /// APIs). Default `true`.
     pub jit_transforms: Option<bool>,
-    /// Hoist `jest.mock()` / `jest.unmock()` / etc. above imports
-    /// (babel-plugin-jest-hoist). Default `false`; the jest plugin enables it.
-    pub hoist_jest_mock: Option<bool>,
+    /// Hoist mock-registration calls (`mock()` / `unmock()` / …) above imports
+    /// (babel-plugin-jest-hoist). `"jest"` hoists `jest.*` (global or
+    /// `@jest/globals`); `"vi"` hoists `vi.*` (global or `vitest`). Omitted /
+    /// unknown (default) hoists nothing. The jest plugin sets `"jest"`.
+    pub hoist_mock: Option<String>,
     /// JSX runtime for `.tsx`/`.jsx` (mixed Angular + React): `"automatic"`
     /// (default) or `"classic"`. Derive from tsconfig `jsx`.
     pub jsx: Option<String>,
@@ -91,6 +94,14 @@ fn parse_module(value: Option<&str>) -> ModuleKind {
     }
 }
 
+fn parse_mock_framework(value: Option<&str>) -> Option<MockFramework> {
+    match value {
+        Some("jest") => Some(MockFramework::Jest),
+        Some("vi") => Some(MockFramework::Vi),
+        _ => None,
+    }
+}
+
 fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
     let defaults = NgOptions::default();
     let Some(options) = options else {
@@ -108,7 +119,7 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
             .use_define_for_class_fields
             .unwrap_or(defaults.use_define_for_class_fields),
         jit_transforms: options.jit_transforms.unwrap_or(defaults.jit_transforms),
-        hoist_jest_mock: options.hoist_jest_mock.unwrap_or(defaults.hoist_jest_mock),
+        hoist_mock: parse_mock_framework(options.hoist_mock.as_deref()),
         jsx: JsxConfig {
             runtime: match options.jsx.as_deref() {
                 Some("classic") => JsxRuntime::Classic,

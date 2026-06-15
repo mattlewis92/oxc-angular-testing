@@ -270,10 +270,11 @@ export function createTransformer(
         // inconsistent knob.
         coverage: transformerOptions.coverage ?? collectCoverage,
         // Hoist `jest.mock()` above imports for the user's test code (jest
-        // requires this). Deps are library code with no jest.mock + skip JIT.
+        // requires this). Deps are library code with no jest.mock + skip JIT;
+        // force hoisting off for them so a `transform` override can't leak in.
         ...(isDep
-          ? { jitTransforms: false, hoistJestMock: false }
-          : { hoistJestMock: true }),
+          ? { jitTransforms: false, hoistMock: undefined }
+          : { hoistMock: 'jest' as const }),
       };
       if (opts.coverage) verifyCoverageSchemaOnce();
       const out = transform(sourceText, sourcePath, opts);

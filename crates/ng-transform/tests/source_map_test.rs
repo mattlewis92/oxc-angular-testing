@@ -4,7 +4,7 @@
 //! tests decode the emitted map and assert real generated tokens resolve back
 //! to their original line.
 
-use ng_transform::{ModuleKind, TransformOptions, transform};
+use ng_transform::{MockFramework, ModuleKind, TransformOptions, transform};
 use oxc_sourcemap::SourceMap;
 
 struct Decoded {
@@ -132,7 +132,7 @@ fn hoisted_jest_mock_maps_to_its_original_line() {
         module: ModuleKind::CommonJs,
         target: "es2022".to_string(),
         jit_transforms: false,
-        hoist_jest_mock: true,
+        hoist_mock: Some(MockFramework::Jest),
         source_map: true,
         ..TransformOptions::default()
     };

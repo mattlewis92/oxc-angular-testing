@@ -105,14 +105,31 @@ export interface OxcAngularOptions {
    */
   keepStyles?: boolean;
   /**
+   * Hoist `vi.mock()` / `vi.unmock()` calls above imports during the transform
+   * (porting babel-plugin-jest-hoist for vitest). Default `false`: vitest's own
+   * `hoistMocks` already hoists `vi.mock`, so the transform leaves it alone.
+   *
+   * Enable this only for code paths that bypass vitest's hoister — e.g. an
+   * in-worker fast path that transforms workspace modules directly and
+   * short-circuits the server fetch where `hoistMocks` runs. There, an
+   * un-hoisted `vi.mock` in a spec is registered too late (after the import it
+   * was meant to intercept) and silently no-ops.
+   */
+  hoistMock?: boolean;
+  /**
    * Override individual transform options forwarded to the Rust transform.
    * `module` is intentionally excluded (Vitest always runs native ESM, so this
    * plugin only ever emits ESM), as are `coverage` and `keepStyles`
-   * (controlled by the dedicated top-level options) and `keepStylesQuery`
-   * (always `'inline'` — the query Vite's CSS pipeline understands).
+   * (controlled by the dedicated top-level options), `keepStylesQuery`
+   * (always `'inline'` — the query Vite's CSS pipeline understands), and
+   * `hoistMock` (the dedicated top-level boolean above; this plugin only ever
+   * hoists `vi`).
    */
   transform?: Partial<
-    Omit<TransformOptions, 'module' | 'coverage' | 'keepStyles' | 'keepStylesQuery'>
+    Omit<
+      TransformOptions,
+      'module' | 'coverage' | 'keepStyles' | 'keepStylesQuery' | 'hoistMock'
+    >
   >;
 }
 
@@ -191,6 +208,11 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
           // Vite returns the compiled CSS as a string for `?inline` imports —
           // hard-coded here since this plugin always delegates CSS to Vite.
           keepStylesQuery: 'inline',
+          // vi.mock hoisting: off by default (vitest's own `hoistMocks` handles
+          // it); opt in via the top-level `hoistMock` for fast paths that bypass
+          // that hoister. Computed after the `transform` spread so it is the only
+          // knob — `transform` can't set it (excluded from its type).
+          hoistMock: options.hoistMock ? 'vi' : undefined,
           // Vitest runs native ESM: force `esm` last so neither the
           // tsconfig-derived options nor an explicit override can select CJS.
           module: 'esm',

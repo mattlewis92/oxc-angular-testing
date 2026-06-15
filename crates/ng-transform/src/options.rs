@@ -17,6 +17,20 @@ pub enum ModuleKind {
     Esm,
 }
 
+/// Test runner whose mock-registration calls are hoisted above imports.
+///
+/// Selects the object name, import module, and hoisted method set for the
+/// `babel-plugin-jest-hoist` port. See [`TransformOptions::hoist_mock`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockFramework {
+    /// `jest.*` from the `jest` global or `@jest/globals`. Hoisted methods:
+    /// `mock`, `unmock`, `deepUnmock`, `enableAutomock`, `disableAutomock`.
+    Jest,
+    /// `vi.*` from the `vi` global (vitest `globals: true`) or `vitest`. Hoisted
+    /// methods: `mock`, `unmock` (`doMock` / `doUnmock` run in place).
+    Vi,
+}
+
 /// JSX runtime, mirroring tsconfig `jsx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JsxRuntime {
@@ -64,10 +78,20 @@ pub struct TransformOptions {
     /// Run the Angular compiler-cli JIT transforms (downlevel decorators +
     /// signal initializer-API decorators) before lowering.
     pub jit_transforms: bool,
-    /// Hoist `jest.mock()` / `jest.unmock()` / etc. above imports, porting
-    /// `babel-plugin-jest-hoist`. The jest plugin always enables this; vitest
-    /// does its own `vi.mock` hoisting, so it leaves this off.
-    pub hoist_jest_mock: bool,
+    /// Hoist mock-registration calls (`mock()` / `unmock()` / …) above imports,
+    /// porting `babel-plugin-jest-hoist`. `None` (the default) hoists nothing;
+    /// the variant selects the runner (object name, import module, method set).
+    ///
+    /// The jest plugin sets [`MockFramework::Jest`] for the user's test code:
+    /// `jest.mock('./x', factory)` must run before the module under test is
+    /// imported, but users write it after their imports.
+    ///
+    /// Vitest normally relies on its own `vi.mock` hoister and leaves this
+    /// `None`. Set [`MockFramework::Vi`] only for code paths that bypass that
+    /// hoister (e.g. an in-worker transform that short-circuits the server fetch
+    /// where vitest's `hoistMocks` runs), where an un-hoisted `vi.mock` would
+    /// register too late and silently no-op.
+    pub hoist_mock: Option<MockFramework>,
     /// JSX/TSX transform configuration (mixed Angular + React repos). See
     /// [`JsxConfig`]. Inert for `.ts` (no JSX).
     pub jsx: JsxConfig,
@@ -113,7 +137,7 @@ impl Default for TransformOptions {
             emit_decorator_metadata: false,
             use_define_for_class_fields: false,
             jit_transforms: true,
-            hoist_jest_mock: false,
+            hoist_mock: None,
             jsx: JsxConfig::default(),
             target: "esnext".to_string(),
             keep_styles: false,

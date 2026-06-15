@@ -19,12 +19,12 @@
 
 mod delegate_ctor;
 mod esm_to_cjs;
-mod jest_hoist;
 mod jit_transform;
+mod mock_hoist;
 mod options;
 mod resources;
 
-pub use options::{JsxConfig, JsxRuntime, ModuleKind, TransformOptions};
+pub use options::{JsxConfig, JsxRuntime, MockFramework, ModuleKind, TransformOptions};
 
 use std::path::Path;
 
@@ -41,8 +41,8 @@ use oxc_transformer::{
 use oxc_traverse::traverse_mut;
 
 use delegate_ctor::DelegateCtorTransform;
-use jest_hoist::JestHoist;
 use jit_transform::JitTransform;
+use mock_hoist::MockHoist;
 use resources::ResourceTransform;
 
 /// Result of a [`transform`] call.
@@ -136,14 +136,15 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         traverse_mut(&mut jit, &allocator, &mut program, scoping, ());
     }
 
-    // Hoist `jest.mock()` above imports (babel-plugin-jest-hoist), before the
-    // ESM→CJS rewrite so the hoisted call lands above the generated requires.
-    if options.hoist_jest_mock {
+    // Hoist `jest.mock()` / `vi.mock()` above imports (babel-plugin-jest-hoist),
+    // before the ESM→CJS rewrite so the hoisted call lands above the generated
+    // requires.
+    if let Some(framework) = options.hoist_mock {
         let scoping = SemanticBuilder::new()
             .build(&program)
             .semantic
             .into_scoping();
-        let mut hoist = JestHoist::new();
+        let mut hoist = MockHoist::new(framework);
         traverse_mut(&mut hoist, &allocator, &mut program, scoping, ());
     }
 
