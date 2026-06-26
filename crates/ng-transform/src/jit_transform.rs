@@ -847,23 +847,40 @@ impl JitTransform {
         param: &mut FormalParameter<'a>,
         ast: AstBuilder<'a>,
     ) -> (Expression<'a>, bool) {
-        // Resolve the type before we touch decorators.
-        let value_names = &self.value_names;
-        let type_expr = param.type_annotation.as_ref().map_or_else(
-            || undefined(ast),
-            |ann| type_to_expr(&ann.type_annotation, value_names, ast),
-        );
-
         let mut keep = ast.vec();
         let mut angular: Vec<Decorator<'a>> = Vec::new();
+        let mut has_inject = false;
         for dec in std::mem::replace(&mut param.decorators, ast.vec()) {
-            if self.decorator_ng_name(&dec).is_some() {
-                angular.push(dec);
-            } else {
-                keep.push(dec);
+            match self.decorator_ng_name(&dec) {
+                Some(name) => {
+                    // `@Inject(token)` supplies the DI token directly; Angular only
+                    // falls back to the reflected `type` when no `@Inject` is present.
+                    has_inject |= name == "Inject";
+                    angular.push(dec);
+                }
+                None => keep.push(dec),
             }
         }
         param.decorators = keep;
+
+        // When the param carries `@Inject`, the `type` slot is dead metadata (the
+        // token drives DI). Emit `undefined` and drop the type annotation so neither
+        // this pass nor oxc's `design:paramtypes` (under `emitDecoratorMetadata`)
+        // resurrects the imported binding as a value. That binding may be a
+        // type-only export — e.g. an interface — with no runtime export, which
+        // breaks a bundler's static link check (`MISSING_EXPORT`). The annotation is
+        // erased during TS→JS regardless, and dropping it lets oxc elide the import
+        // when it's otherwise unused.
+        let type_expr = if has_inject {
+            param.type_annotation = None;
+            undefined(ast)
+        } else {
+            let value_names = &self.value_names;
+            param.type_annotation.as_ref().map_or_else(
+                || undefined(ast),
+                |ann| type_to_expr(&ann.type_annotation, value_names, ast),
+            )
+        };
 
         let had_angular = !angular.is_empty();
         let mut props = vec![prop("type", type_expr, ast)];

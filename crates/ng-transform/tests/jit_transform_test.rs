@@ -2,7 +2,7 @@
 //! initializer-API decorators), ported from `@angular/compiler-cli`.
 //! These snapshot the JIT passes pre-lowering (`lower: false`).
 
-use ng_transform::{TransformOptions, transform};
+use ng_transform::{ModuleKind, TransformOptions, transform};
 
 fn ts(source: &str) -> String {
     let opts = TransformOptions {
@@ -40,16 +40,17 @@ export class MyDir {
 }
 "#,
     );
-    // Param decorators removed from the signature.
+    // Param decorators removed from the signature. The `@Inject`-ed param's type
+    // annotation is also dropped (its `type` slot is dead under `@Inject`), so the
+    // first param loses `: any`; the `@Optional()`-only param keeps `: Svc`.
     assert!(
-        code.contains("constructor(token, svc)")
-            || code.contains("constructor(token: any, svc: Svc)"),
+        code.contains("constructor(token, svc)") || code.contains("constructor(token, svc: Svc)"),
         "{code}"
     );
     assert!(code.contains(r#"type: Inject"#), "{code}");
     assert!(code.contains(r#"args: ["TOK"]"#), "{code}");
     assert!(code.contains(r#"type: Optional"#), "{code}");
-    // `any` → undefined; class type → the value reference.
+    // `@Inject`-ed param → type: undefined; `@Optional()`-only class type → value ref.
     assert!(code.contains("type: undefined"), "{code}");
     assert!(code.contains("type: Svc"), "{code}");
 }
@@ -78,13 +79,15 @@ fn type_only_param_types_emit_object_not_dangling_reference() {
     // Regression: utility types (`Pick`), structural types (`ReadonlyArray`) and
     // `import type` symbols have no runtime value — emitting them as the param
     // `type` threw `ReferenceError` during Angular DI. They must become `Object`.
-    let code = ts(r#"import { Inject, Injectable } from '@angular/core';
+    // (These params are NOT `@Inject`-ed, so the type slot is still reflected and
+    // exercises the `Object` fallback — the `@Inject` case is covered separately.)
+    let code = ts(r#"import { Injectable } from '@angular/core';
 import type { Config } from './config';
 @Injectable()
 export class R3Service {
   constructor(
-    @Inject('CONFIG') private readonly cfg: Pick<Config, 'a'>,
-    @Inject('NAMES') private readonly names: ReadonlyArray<string>,
+    private readonly cfg: Pick<Config, 'a'>,
+    private readonly names: ReadonlyArray<string>,
   ) {}
 }
 "#);
@@ -356,4 +359,166 @@ fn ignores_classes_without_angular_decorators() {
 "#);
     assert!(!code.contains("ctorParameters"), "{code}");
     assert!(!code.contains("propDecorators"), "{code}");
+}
+
+// ---------------------------------------------------------------------------
+// `@Inject`-ed constructor params: the `type` slot is dead metadata (the token
+// drives DI), so it must not resurrect a type-only import binding that has no
+// runtime export — which a bundler's static link check would reject. We emit
+// `type: undefined` and drop the annotation so oxc elides the import.
+// These run the full lowering pipeline (`lower: true`) in ESM to observe the
+// final import set — the bundle-safety property the fix is about.
+// ---------------------------------------------------------------------------
+
+fn esm(source: &str) -> String {
+    esm_with(source, false)
+}
+
+fn esm_meta(source: &str) -> String {
+    esm_with(source, true)
+}
+
+fn esm_with(source: &str, emit_decorator_metadata: bool) -> String {
+    let opts = TransformOptions {
+        module: ModuleKind::Esm,
+        emit_decorator_metadata,
+        ..TransformOptions::default()
+    };
+    let out = transform(source, "x.component.ts", &opts);
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    out.code
+}
+
+#[test]
+fn tc1_inject_interface_param_drops_type_and_elides_import() {
+    // The bug: an interface imported with a plain value import + `@Inject` was
+    // emitted as `type: Cfg`, keeping `import { Cfg }` alive — but `./cfg` has no
+    // runtime `Cfg` export, so a bundle link-fails with MISSING_EXPORT.
+    let code = esm(
+        r#"import { Component, Inject, Optional } from '@angular/core';
+import { Cfg } from './cfg';
+export const TOKEN = {};
+@Component({ selector: 'x', template: '' })
+export class X { constructor(@Optional() @Inject(TOKEN) private c?: Cfg) {} }"#,
+    );
+    // The dead `type` slot is `undefined`, not the `Cfg` value reference.
+    assert!(code.contains("type: undefined"), "{code}");
+    assert!(!code.contains("type: Cfg"), "{code}");
+    // `Cfg` is referenced only in the (erased) type position → import elided.
+    assert!(
+        !code.contains(r#"from "./cfg""#),
+        "Cfg import must be elided:\n{code}"
+    );
+    // The `@Inject` token + flags are preserved so DI still resolves.
+    assert!(
+        code.contains("type: Inject") && code.contains("args: [TOKEN]"),
+        "{code}"
+    );
+    assert!(code.contains("type: Optional"), "{code}");
+}
+
+#[test]
+fn tc2_class_param_without_inject_keeps_type_and_import() {
+    // Implicit type-based DI: no `@Inject`, so the reflected `type` is the token.
+    // Must NOT regress — keep `type: MyService` and the import.
+    let code = esm(r#"import { Component } from '@angular/core';
+import { MyService } from './my-service';
+@Component({ selector: 'x', template: '' })
+export class X { constructor(private svc: MyService) {} }"#);
+    assert!(code.contains("type: MyService"), "{code}");
+    assert!(
+        code.contains(r#"from "./my-service""#),
+        "import must be kept:\n{code}"
+    );
+}
+
+#[test]
+fn tc3_class_param_with_inject_drops_type_and_elides_import() {
+    // Allowed behavior change: with `@Inject`, the token drives DI, so the class
+    // `type` is redundant. Emit `undefined` and elide the now-unused import.
+    let code = esm(r#"import { Component, Inject } from '@angular/core';
+import { MyService } from './my-service';
+export const SVC = {};
+@Component({ selector: 'x', template: '' })
+export class X { constructor(@Inject(SVC) private svc: MyService) {} }"#);
+    assert!(code.contains("type: undefined"), "{code}");
+    assert!(!code.contains("type: MyService"), "{code}");
+    assert!(
+        !code.contains(r#"from "./my-service""#),
+        "unused MyService import must be elided:\n{code}"
+    );
+    // DI still resolves via the token.
+    assert!(
+        code.contains("type: Inject") && code.contains("args: [SVC]"),
+        "{code}"
+    );
+}
+
+#[test]
+fn tc4_import_type_param_stays_elided_and_safe() {
+    // Already-correct cases: locked in. `import type` and inline `type` are elided
+    // and the `type` slot is bundle-safe (no dangling reference).
+    for import in [
+        "import type { Cfg } from './cfg';",
+        "import { type Cfg } from './cfg';",
+    ] {
+        let code = esm(&format!(
+            r#"import {{ Component, Inject }} from '@angular/core';
+{import}
+export const TOKEN = {{}};
+@Component({{ selector: 'x', template: '' }})
+export class X {{ constructor(@Inject(TOKEN) private c?: Cfg) {{}} }}"#
+        ));
+        assert!(
+            !code.contains(r#"from "./cfg""#),
+            "{import}: import must stay elided:\n{code}"
+        );
+        assert!(!code.contains("type: Cfg"), "{import}:\n{code}");
+        assert!(code.contains("type: undefined"), "{import}:\n{code}");
+    }
+}
+
+#[test]
+fn tc5_local_class_param_type_is_unchanged() {
+    // A local (non-imported) class, no `@Inject` → `type: Local` as before.
+    let code = esm(r#"import { Component } from '@angular/core';
+class Local {}
+@Component({ selector: 'x', template: '' })
+export class X { constructor(private l: Local) {} }"#);
+    assert!(code.contains("type: Local"), "{code}");
+}
+
+#[test]
+fn tc6_primitive_param_types_are_unchanged() {
+    let code = esm(r#"import { Component } from '@angular/core';
+@Component({ selector: 'x', template: '' })
+export class X { constructor(a: string, b: number, c: boolean) {} }"#);
+    assert!(code.contains("type: String"), "{code}");
+    assert!(code.contains("type: Number"), "{code}");
+    assert!(code.contains("type: Boolean"), "{code}");
+}
+
+#[test]
+fn tc7_emit_decorator_metadata_does_not_reference_elided_binding() {
+    // `design:paramtypes` (emitted by oxc under `emitDecoratorMetadata`) must not
+    // reference the elided interface binding — dropping the annotation makes oxc
+    // emit the bundle-safe `Object` placeholder instead.
+    let code = esm_meta(
+        r#"import { Component, Inject, Optional } from '@angular/core';
+import { Cfg } from './cfg';
+export const TOKEN = {};
+@Component({ selector: 'x', template: '' })
+export class X { constructor(@Optional() @Inject(TOKEN) private c?: Cfg) {} }"#,
+    );
+    assert!(code.contains("design:paramtypes"), "{code}");
+    assert!(
+        !code.contains("Cfg"),
+        "design:paramtypes must not reference Cfg:\n{code}"
+    );
+    assert!(
+        !code.contains(r#"from "./cfg""#),
+        "Cfg import must be elided:\n{code}"
+    );
+    // The ctorParameters `type` slot is also undefined.
+    assert!(code.contains("type: undefined"), "{code}");
 }
