@@ -156,22 +156,50 @@ impl<'a> Traverse<'a, ()> for MockHoist {
             return;
         }
         let ast: AstBuilder<'a> = ctx.ast;
+        let module_source = self.framework.module_source();
+        let object_name = self.framework.object_name();
         let old = std::mem::replace(stmts, ast.vec());
+        let mut providers = ast.vec();
         let mut hoisted = ast.vec();
         let mut rest = ast.vec();
         for s in old {
             if is_hoistable(&s, &self.locals, methods) {
                 hoisted.push(s);
+            } else if declares_runner_object(&s, module_source, object_name) {
+                providers.push(s);
             } else {
                 rest.push(s);
             }
         }
-        // Hoisted calls first (in source order), then the rest (in source order).
-        for s in rest {
-            hoisted.push(s);
+        // Statements that bind the runner object (`import { jest } from
+        // '@jest/globals'` / `const { jest } = require('@jest/globals')`) must
+        // stay ABOVE the hoisted calls: after the ESM→CJS rewrite the import
+        // becomes `const globals_1 = require("@jest/globals")`, and a hoisted
+        // `globals_1.jest.mock(…)` above that declaration is a TDZ
+        // ReferenceError. ts-jest orders it the same way; requiring the runner's
+        // module first loads no user code, so mock registration still precedes
+        // every module under test. Within each group, source order is kept.
+        for s in hoisted {
+            providers.push(s);
         }
-        *stmts = hoisted;
+        for s in rest {
+            providers.push(s);
+        }
+        *stmts = providers;
         self.changed = true;
+    }
+}
+
+/// Is `stmt` a statement that (potentially) binds the runner object — an import
+/// of the runner's module, or a `const { <obj> } = require('<module>')`?
+fn declares_runner_object(stmt: &Statement<'_>, module_source: &str, object_name: &str) -> bool {
+    match stmt {
+        Statement::ImportDeclaration(import) => import.source.value.as_str() == module_source,
+        Statement::VariableDeclaration(decl) => decl
+            .declarations
+            .iter()
+            .any(|d| object_destructured_from_require(d, module_source, object_name).is_some()),
+        _ => false,
     }
 }
 

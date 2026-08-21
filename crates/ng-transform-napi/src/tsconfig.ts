@@ -11,6 +11,7 @@ export interface DerivedTransformOptions {
   module?: 'commonjs' | 'esm';
   experimentalDecorators?: boolean;
   emitDecoratorMetadata?: boolean;
+  strictNullChecks?: boolean;
   useDefineForClassFields?: boolean;
   jsx?: 'automatic' | 'classic';
   jsxImportSource?: string;
@@ -157,6 +158,13 @@ export function deriveTransformOptions(
   if (co.emitDecoratorMetadata !== undefined) {
     options.emitDecoratorMetadata = co.emitDecoratorMetadata;
   }
+  // Effective value, the way tsc computes strict-family flags
+  // (getStrictOptionValue): an explicit `strictNullChecks` wins, else `strict`,
+  // else false. Metadata serialization depends on it (`string | null` is
+  // `String` under SNC-off, `Object` under strict), so a tsconfig-driven setup
+  // must always carry the effective value — the Rust default (true) only covers
+  // the no-tsconfig case.
+  options.strictNullChecks = co.strictNullChecks ?? co.strict ?? false;
   if (useDefine !== undefined) options.useDefineForClassFields = useDefine;
 
   // JSX (mixed Angular + React). ts.JsxEmit: React=2 (classic), ReactJSX=4,

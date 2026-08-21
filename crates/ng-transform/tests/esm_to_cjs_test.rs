@@ -218,13 +218,25 @@ fn reexport_of_imported_binding_uses_namespace() {
 }
 
 #[test]
-fn same_source_imported_and_reexported_requires_once() {
-    // `import {helper} from './h'` + `export {helper} from './h'` must emit the
-    // `const h_1 = require("./h")` exactly once (no duplicate declaration).
+fn reexport_uses_its_own_raw_require_var() {
+    // tsc parity: a re-export's getters read a dedicated RAW require var, never
+    // the import statement's variable — that one may be `__importDefault`/
+    // `__importStar`-wrapped, and the wrapper hides named properties when the
+    // target lacks `__esModule` (a CJS dep or a `jest.mock` factory). Two
+    // requires of the same source are fine (Node caches); a broken getter isn't.
     let code = cjs("import { helper } from './h';\nexport { helper } from './h';\nhelper();");
-    let count = code.matches("require(\"./h\")").count();
-    assert_eq!(count, 1, "require should appear once:\n{code}");
-    assert!(code.contains("get: () => h_1.helper"), "{code}");
+    assert!(code.contains("get: () => h_2.helper"), "{code}");
+    assert!(code.contains("(0, h_1.helper)()"), "{code}");
+
+    // The default-import + named-re-export shape (the jest.mock regression):
+    // the import var is wrapped, the getter var must stay raw.
+    let code = cjs("import d from './h';\nexport { helper } from './h';\nexport default d;");
+    assert!(
+        code.contains("const h_1 = __importDefault(require(\"./h\"))"),
+        "{code}"
+    );
+    assert!(code.contains("const h_2 = require(\"./h\")"), "{code}");
+    assert!(code.contains("get: () => h_2.helper"), "{code}");
 }
 
 #[test]

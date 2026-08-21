@@ -18,11 +18,13 @@
 //! the preamble is prepended at the single codegen.
 
 mod delegate_ctor;
+mod enum_ref_fold;
 mod esm_to_cjs;
 mod jit_transform;
 mod mock_hoist;
 mod options;
 mod resources;
+mod strict_null_strip;
 
 pub use options::{JsxConfig, JsxRuntime, MockFramework, ModuleKind, TransformOptions};
 
@@ -35,8 +37,9 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use oxc_transformer::{
-    CompilerAssumptions, DecoratorOptions, EnvOptions, JsxOptions, JsxRuntime as OxcJsxRuntime,
-    Module, TransformOptions as OxcTransformOptions, Transformer, TypeScriptOptions,
+    CompilerAssumptions, DecoratorOptions, EnvOptions, HelperLoaderOptions, JsxOptions,
+    JsxRuntime as OxcJsxRuntime, Module, TransformOptions as OxcTransformOptions, Transformer,
+    TypeScriptOptions,
 };
 use oxc_traverse::traverse_mut;
 
@@ -148,6 +151,21 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         traverse_mut(&mut hoist, &allocator, &mut program, scoping, ());
     }
 
+    // tsconfig `strictNullChecks: false` metadata parity: strip `null`/
+    // `undefined` from union type annotations before the serializer sees them
+    // (see `strict_null_strip`). Type-only — needs no scoping.
+    if options.lower && options.emit_decorator_metadata && !options.strict_null_checks {
+        use oxc_ast_visit::VisitMut;
+        strict_null_strip::StripNullableUnions.visit_program(&mut program);
+    }
+
+    // Fold same-file enum-member references in enum initializers to their
+    // literals (tsc parity — see `enum_ref_fold`), so oxc's enum lowering emits
+    // the string-enum form instead of a bogus reverse mapping.
+    if options.lower {
+        enum_ref_fold::fold_same_file_enum_refs(&mut program, oxc_ast::AstBuilder::new(&allocator));
+    }
+
     // TypeScript → JavaScript + legacy-decorator lowering, so the output is
     // executable under the test runner. `Module::CommonJS` is selected for the
     // require path (jest/CJS), ESM otherwise (vitest).
@@ -182,6 +200,12 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             }
         };
         env.module = module;
+        // BigInt literals cannot be downleveled; oxc's `big_int` flag exists only
+        // to hard-error on them when the target predates ES2020. tsc in
+        // transpile-only mode (the ts-jest/isolatedModules baseline this transform
+        // replaces) passes them through untouched — TS2737 is a checker
+        // diagnostic, and nothing type-checks here. Match tsc: never error.
+        env.es2020.big_int = false;
         // `async`/`await` downlevels per `target`, pulling in oxc's runtime
         // `asyncToGenerator` helper (imported from `@oxc-project/runtime`). Its
         // bare, late-bound `new Promise` resolves to the realm-global `Promise` at
@@ -215,6 +239,13 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             decorator: DecoratorOptions {
                 legacy: options.experimental_decorators,
                 emit_decorator_metadata: options.emit_decorator_metadata,
+            },
+            helper_loader: HelperLoaderOptions {
+                module_name: options
+                    .helper_module_name
+                    .clone()
+                    .map_or_else(|| HelperLoaderOptions::default().module_name, Into::into),
+                ..HelperLoaderOptions::default()
             },
             env,
             // Runtime mode imports decorator/class helpers from `@oxc-project/runtime`

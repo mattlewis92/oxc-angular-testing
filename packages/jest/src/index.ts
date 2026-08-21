@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
 import {
@@ -89,6 +90,67 @@ function verifyCoverageSchemaOnce(): void {
         'please file an issue against @oxc-angular-testing.',
     );
   }
+}
+
+// A local rebuild of the native binding (or of this plugin) doesn't bump the
+// package version, so `transformVersion` alone serves STALE cached transforms
+// during development — a rebuilt `.node` with the old cache looks like "the fix
+// didn't work". Fold in the binding files' size+mtime and this file's own mtime
+// (statted once per worker); in a published install these are fixed, so cache
+// behavior there is unchanged.
+const bindingStamp = (() => {
+  const parts: string[] = [];
+  try {
+    parts.push(String(fs.statSync(__filename).mtimeMs));
+  } catch {
+    /* keep what we have */
+  }
+  try {
+    const dir = path.dirname(require.resolve('@oxc-angular-testing/transform/package.json'));
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith('.node')) {
+        const s = fs.statSync(path.join(dir, f));
+        parts.push(`${f}:${s.size}:${s.mtimeMs}`);
+      }
+    }
+  } catch {
+    /* prebuilt binding packages — version alone suffices */
+  }
+  return parts.join(',');
+})();
+
+// Runtime helpers (`_decorate`, `_async_to_generator`, …) are emitted as
+// `require("@oxc-project/runtime/helpers/<name>")` — a dependency of
+// `@oxc-angular-testing/transform`, NOT of the consumer. Node (and jest-resolve)
+// resolve that specifier from the *transformed file's* directory, so under a
+// package manager with isolated node_modules (pnpm) the bare specifier is
+// unresolvable from application code and every decorated file fails to load.
+// Resolve the package once, relative to the transform package itself, and emit
+// helpers by absolute path instead — correct under every layout (hoisted npm,
+// isolated pnpm, linked local checkouts). CommonJS output only: `require()`
+// resolves extensionless absolute paths, while an ESM `import` would not (and
+// a Windows drive path is not a valid ESM specifier), so ESM output keeps the
+// bare specifier. Resolving a known helper file (rather than the package root)
+// honors the exports map, which rewrites `./helpers/*` into `./src/helpers/*`;
+// stripping `/helpers/decorate.js` leaves the prefix oxc appends
+// `helpers/<name>` to. `null` (resolution failed) falls back to the bare
+// specifier — the pre-existing behavior.
+let cjsHelperModuleName: string | null | undefined;
+function resolveCjsHelperModuleName(): string | undefined {
+  if (cjsHelperModuleName === undefined) {
+    try {
+      const transformDir = path.dirname(
+        require.resolve('@oxc-angular-testing/transform/package.json'),
+      );
+      const decorate = require.resolve('@oxc-project/runtime/helpers/decorate', {
+        paths: [transformDir],
+      });
+      cjsHelperModuleName = path.dirname(path.dirname(decorate));
+    } catch {
+      cjsHelperModuleName = null;
+    }
+  }
+  return cjsHelperModuleName ?? undefined;
 }
 
 /** The per-file `options` jest passes to a transformer (the slice we read). */
@@ -235,9 +297,15 @@ export function createTransformer(
         .createHash('sha1')
         .update(transformVersion)
         .update('\0')
+        .update(bindingStamp)
+        .update('\0')
         .update(JSON.stringify(transformerOptions))
         .update('\0')
         .update(JSON.stringify(derived))
+        .update('\0')
+        // The resolved helper path is baked into the output — a moved/reinstalled
+        // node_modules must not serve stale absolute paths from jest's cache.
+        .update(resolveCjsHelperModuleName() ?? '')
         .update('\0')
         .update(options?.instrument ? '1' : '0')
         .update('\0')
@@ -261,6 +329,11 @@ export function createTransformer(
       const isDep = isEsmDependency(sourcePath, transformerOptions.processEsmModules);
       const opts: TransformOptions = {
         ...derived,
+        // Absolute helper path for CJS output (see resolveCjsHelperModuleName);
+        // an explicit `transform.helperModuleName` override wins.
+        ...(moduleKind === 'commonjs'
+          ? { helperModuleName: resolveCjsHelperModuleName() }
+          : {}),
         ...transformerOptions.transform,
         module: moduleKind,
         // Coverage precedence (identical in the vitest plugin): an explicit
