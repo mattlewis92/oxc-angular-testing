@@ -107,7 +107,9 @@ const bindingStamp = (() => {
   }
   try {
     const dir = path.dirname(require.resolve('@oxc-angular-testing/transform/package.json'));
-    for (const f of fs.readdirSync(dir)) {
+    // Sorted: readdir order is filesystem-dependent, and the stamp must be
+    // deterministic for stable cache keys.
+    for (const f of fs.readdirSync(dir).sort()) {
       if (f.endsWith('.node')) {
         const s = fs.statSync(path.join(dir, f));
         parts.push(`${f}:${s.size}:${s.mtimeMs}`);
@@ -287,12 +289,20 @@ export function createTransformer(
     return result;
   };
 
+  // The helper module name actually baked into the output: an explicit
+  // `transform.helperModuleName` override wins, else the resolved absolute
+  // path for CJS output only (ESM keeps the bare specifier). Shared by
+  // process() and getCacheKey() so the cache is keyed on exactly what emits.
+  const effectiveHelperModuleName = (moduleKind: 'commonjs' | 'esm'): string | undefined =>
+    transformerOptions.transform?.helperModuleName ??
+    (moduleKind === 'commonjs' ? resolveCjsHelperModuleName() : undefined);
+
   return {
     canInstrument: true,
     // Include the native transform version so jest's transform cache is
     // invalidated when the binding (and thus its output) changes.
     getCacheKey(sourceText, sourcePath, options) {
-      const { derived } = resolve(options?.config);
+      const { derived, moduleKind } = resolve(options?.config);
       return crypto
         .createHash('sha1')
         .update(transformVersion)
@@ -303,9 +313,10 @@ export function createTransformer(
         .update('\0')
         .update(JSON.stringify(derived))
         .update('\0')
-        // The resolved helper path is baked into the output — a moved/reinstalled
-        // node_modules must not serve stale absolute paths from jest's cache.
-        .update(resolveCjsHelperModuleName() ?? '')
+        // The EFFECTIVE helper name is baked into the output — a moved/
+        // reinstalled node_modules must not serve stale absolute paths from
+        // jest's cache. ESM output (bare specifier) hashes nothing extra.
+        .update(effectiveHelperModuleName(moduleKind) ?? '')
         .update('\0')
         .update(options?.instrument ? '1' : '0')
         .update('\0')
@@ -329,12 +340,11 @@ export function createTransformer(
       const isDep = isEsmDependency(sourcePath, transformerOptions.processEsmModules);
       const opts: TransformOptions = {
         ...derived,
-        // Absolute helper path for CJS output (see resolveCjsHelperModuleName);
-        // an explicit `transform.helperModuleName` override wins.
-        ...(moduleKind === 'commonjs'
-          ? { helperModuleName: resolveCjsHelperModuleName() }
-          : {}),
         ...transformerOptions.transform,
+        // Effective helper name (override, else absolute path for CJS — see
+        // effectiveHelperModuleName); placed after the transform spread because
+        // it already folds the override in.
+        helperModuleName: effectiveHelperModuleName(moduleKind),
         module: moduleKind,
         // Coverage precedence (identical in the vitest plugin): an explicit
         // top-level `coverage` option wins (true OR false); otherwise derive from
