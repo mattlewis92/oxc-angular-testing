@@ -90,6 +90,33 @@ The presets set `transform`, `transformIgnorePatterns` and `moduleFileExtensions
 for you. You can also wire the transformer manually (`'^.+\\.(ts|js)$':
 ['@oxc-angular-testing/jest', { module: 'commonjs' }]`).
 
+### Non-Angular TypeScript (NestJS, plain decorators)
+
+With the Angular JIT passes off, the transform is a general ts-jest replacement
+whose emit matches `tsc` transpile-only mode — including legacy decorators and
+`emitDecoratorMetadata`:
+
+```ts
+// jest.config.ts
+transform: {
+  '^.+\\.[tj]s$': ['@oxc-angular-testing/jest', {
+    tsconfig: '<rootDir>/tsconfig.spec.json', // decorator flags derive from here
+    module: 'commonjs',
+    transform: { jitTransforms: false },      // no Angular passes
+  }],
+},
+```
+
+Decorator behavior follows the tsconfig, exactly the flags tsc reads:
+`experimentalDecorators` (legacy lowering), `emitDecoratorMetadata`
+(`design:type`/`design:paramtypes`/`design:returntype` — NestJS DI, TypeORM,
+class-validator), `strictNullChecks` (effective value, `strictNullChecks ??
+strict ?? false`; SNC-off serializes `string | null` as `String` like tsc,
+strict yields `Object`), plus `target`/`module`/`useDefineForClassFields`/`jsx*`.
+Any derived option can be overridden via `transform: { ... }`. If a jest preset
+also defines `transform` patterns, override the preset's exact keys too — jest
+merges the maps and first match wins.
+
 ### ESM-only dependencies
 
 Like jest-preset-angular's esbuild fast path, the jest plugin downlevels ESM
@@ -135,10 +162,12 @@ decorator/class helpers the lowering emits.
 | TS → JS + legacy decorator lowering, ES `target` downleveling | ✅ via `oxc_transformer` |
 | ESM → CommonJS (matches `tsc` `module:commonjs` + `esModuleInterop`) | ✅ `esm_to_cjs.rs` |
 | Dynamic `import()` → `require` (matches `tsc`) | ✅ `esm_to_cjs.rs` |
-| `jest.mock()` hoisting (babel-plugin-jest-hoist) | ✅ `jest_hoist.rs` (jest plugin) |
+| `jest.mock()` hoisting (babel-plugin-jest-hoist; keeps the `@jest/globals` import above the hoisted calls) | ✅ `mock_hoist.rs` (jest plugin) |
+| Same-file enum-member reference folding (tsc constant evaluator) | ✅ `enum_ref_fold.rs` |
+| `strictNullChecks`-aware decorator metadata (SNC-off nullable-union stripping) | ✅ `strict_null_strip.rs` |
 | JSX/TSX for mixed Angular + React (automatic/classic, from tsconfig `jsx`) | ✅ via `oxc_transformer` |
 | istanbul coverage in the same AST pass | ✅ vendored `instrument_program` |
-| Options derived from tsconfig (target / module / decorators / `useDefineForClassFields` / `jsx`) | ✅ `transform/src/tsconfig.ts` |
+| Options derived from tsconfig (target / module / decorators / `strictNullChecks` / `useDefineForClassFields` / `jsx`) | ✅ `transform/src/tsconfig.ts` |
 | ESM-only dependency downleveling for jest (esbuild-fast-path equivalent) | ✅ jest plugin + `presets.ts` |
 | jest (ESM **and** CommonJS) + vitest plugins, real component integration tests | ✅ |
 
@@ -149,8 +178,22 @@ lowering, coverage) plus the jest/vitest integration suites.
 
 - **CommonJS** output matches TypeScript's `module: "commonjs"` + `esModuleInterop`
   emit (`__importDefault`/`__importStar`/`__exportStar` interop, `(0, m_1.x)()`
-  call wrapping, `exports.x = …`, `__esModule`). Re-exports use assignment rather
-  than `Object.defineProperty` getters (runnable-equivalent for static re-exports).
+  call wrapping, `exports.x = …`, `__esModule`), including tsc's cycle-sensitive
+  details: exported function declarations assign (`exports.f = f;`) *above* the
+  requires, and re-export getters read a dedicated raw `require` var — never an
+  interop-wrapped one, which hides named properties when the target lacks
+  `__esModule` (CJS deps, `jest.mock` factories).
+- **Runtime helpers** (`_decorate`, …) come from `@oxc-project/runtime`, a
+  dependency of the transform package — unresolvable from the transformed
+  file's location under pnpm's isolated `node_modules`, so the jest plugin
+  emits CJS helper requires by absolute path (override:
+  `transform: { helperModuleName }`; ESM keeps the bare specifier).
+- **Same-file enum-member references** (`enum B { X = A.Y }`) constant-fold
+  like tsc, so string members emit the string-enum form with no bogus reverse
+  mapping polluting `Object.values(B)`; cross-file references stay runtime
+  expressions, matching per-file transpile. **BigInt literals** pass through
+  below `target: es2020` (TS2737 is a checker diagnostic; nothing type-checks
+  in transpile mode).
 - **`target`** maps to oxc's `EnvOptions::from_target`; only syntax newer than the
   target is downleveled. **`lower: false`** is a test-only switch to inspect the
   pre-lowering TypeScript AST.
