@@ -795,8 +795,16 @@ fn rewrite_import<'a>(
 ) {
     let source = import.source.value.as_str();
     let span = import.span;
-    if import.specifiers.is_none() {
-        // side-effect import → `require("…");` (skip if already required).
+    if import.specifiers.is_none() && !module_vars.contains_key(source) {
+        // Side-effect import of a source no other statement binds → bare
+        // `require("…");` (skip if already required). When the source IS bound
+        // elsewhere (`import './m'; import { x } from './m'`), fall through and
+        // emit the canonical `const <var> = require(…)` HERE instead: the
+        // binding statement may come later, and the per-source dedup would then
+        // skip its declaration — leaving rewritten references (`m_1.x`) with no
+        // variable at all. Declaring at the earliest position also preserves
+        // evaluation (mock-registration) order, matching tsc's per-statement
+        // requires.
         if emitted.insert(source.to_string()) {
             out.push(ast.statement_expression(span, require_call_at(source, span, ast)));
         }

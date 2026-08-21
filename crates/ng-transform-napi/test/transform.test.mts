@@ -367,3 +367,23 @@ test('enum members initialized from another same-file string enum fold like tsc'
   );
   assert.match(cross.code, /A\.Y/);
 });
+
+test('side-effect import + named import of the same module keeps the require var', () => {
+  // `import './m'; import { x } from './m';` — per-source dedup must not let
+  // the bare side-effect require swallow the `const m_1 = require("./m")`
+  // declaration the rewritten references (`m_1.x`) depend on.
+  const out = transform(
+    "import './m';\nimport { x } from './m';\nexport const y = x;\n",
+    's.ts',
+    { module: 'commonjs', jitTransforms: false },
+  );
+  assert.equal(out.errors.length, 0, out.errors.join('\n'));
+  const sandbox = { exports: {} as Record<string, unknown> };
+  new Function('require', 'exports', 'module', out.code)(
+    () => ({ x: 42 }),
+    sandbox.exports,
+    sandbox,
+  );
+  assert.equal(sandbox.exports.y, 42);
+  assert.equal(out.code.match(/require\("\.\/m"\)/g)?.length, 1, out.code);
+});

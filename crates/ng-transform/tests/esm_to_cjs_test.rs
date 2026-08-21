@@ -538,3 +538,15 @@ fn named_default_class_keeps_its_name() {
         "named default must not be renamed: {code}"
     );
 }
+
+#[test]
+fn side_effect_import_then_named_import_declares_the_var() {
+    // The side-effect statement evaluates first (mock-registration order), so
+    // the canonical declaration is emitted at ITS position; the later binding
+    // statement dedupes. Previously the bare require swallowed the declaration
+    // and `m_1.x` threw "m_1 is not defined".
+    let code = cjs("import './m';\nimport { x } from './m';\nx();");
+    assert!(code.contains("const m_1 = require(\"./m\")"), "{code}");
+    assert_eq!(code.matches("require(\"./m\")").count(), 1, "{code}");
+    assert!(code.contains("(0, m_1.x)()"), "{code}");
+}
