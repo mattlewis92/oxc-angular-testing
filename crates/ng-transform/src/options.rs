@@ -69,6 +69,12 @@ pub struct TransformOptions {
     pub experimental_decorators: bool,
     /// tsconfig `emitDecoratorMetadata`.
     pub emit_decorator_metadata: bool,
+    /// tsconfig `strictNullChecks` (effective value — tsc defaults it from
+    /// `strict`). Only decorator metadata observes it: with `false`, tsc's
+    /// serializer drops `null`/`undefined` union constituents, so
+    /// `string | null` is `String` where strict mode yields `Object`. Default
+    /// `true` — the strict serialization oxc already implements.
+    pub strict_null_checks: bool,
     /// tsconfig `useDefineForClassFields`. When `false`, class fields are emitted
     /// as plain assignments (`this.x = …`) rather than `[[Define]]`
     /// (`Object.defineProperty`) semantics — the historical Angular setting that
@@ -121,6 +127,15 @@ pub struct TransformOptions {
     /// (the default) emits the URL verbatim. The vitest plugin passes
     /// `"inline"`.
     pub keep_styles_query: Option<String>,
+    /// Module name the emitted runtime-helper imports (`_decorate`,
+    /// `_async_to_generator`, …) are loaded from. `None` (the default) keeps
+    /// oxc's own default, `@oxc-project/runtime` — a dependency of the napi
+    /// package. Consumers whose module resolution can't reach that package from
+    /// the *transformed file's* location (pnpm's isolated `node_modules`, where
+    /// a transitive dependency is not resolvable from application code) pass an
+    /// absolute path to the resolved package directory instead; the runner then
+    /// loads helpers by absolute path, which resolves everywhere.
+    pub helper_module_name: Option<String>,
     /// Instrument the output for istanbul-compatible coverage in the same pass.
     pub coverage: bool,
     /// Global coverage variable name (default `__coverage__`).
@@ -135,6 +150,7 @@ impl Default for TransformOptions {
             module: ModuleKind::CommonJs,
             experimental_decorators: true,
             emit_decorator_metadata: false,
+            strict_null_checks: true,
             use_define_for_class_fields: false,
             jit_transforms: true,
             hoist_mock: None,
@@ -142,6 +158,7 @@ impl Default for TransformOptions {
             target: "esnext".to_string(),
             keep_styles: false,
             keep_styles_query: None,
+            helper_module_name: None,
             lower: true,
             coverage: false,
             coverage_variable: None,

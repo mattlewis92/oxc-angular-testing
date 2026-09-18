@@ -19,6 +19,12 @@ export interface TransformOptions {
   experimentalDecorators?: boolean
   /** tsconfig `emitDecoratorMetadata`. */
   emitDecoratorMetadata?: boolean
+  /**
+   * tsconfig `strictNullChecks` (effective value — tsc defaults it from
+   * `strict`). With `false`, decorator metadata drops `null`/`undefined`
+   * union constituents like tsc (`string | null` → `String`). Default `true`.
+   */
+  strictNullChecks?: boolean
   /** tsconfig `useDefineForClassFields` (default `false` — Angular's setting). */
   useDefineForClassFields?: boolean
   /**
@@ -71,6 +77,15 @@ export interface TransformOptions {
    * plugin passes `"inline"`.
    */
   keepStylesQuery?: string
+  /**
+   * Module name the emitted runtime-helper imports (`_decorate`, …) are
+   * loaded from (default `"@oxc-project/runtime"`, a dependency of this
+   * package). Pass an absolute path to the resolved package directory when
+   * the consumer's module resolution can't reach this package's dependencies
+   * from the transformed file's location (pnpm's isolated `node_modules`).
+   * The jest plugin does this automatically.
+   */
+  helperModuleName?: string
   /**
    * Master switch for TS→JS + decorator lowering (default `true`; set `false`
    * only to inspect the pre-lowering TypeScript AST).

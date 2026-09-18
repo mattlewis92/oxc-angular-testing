@@ -25,6 +25,10 @@ pub struct TransformOptions {
     pub experimental_decorators: Option<bool>,
     /// tsconfig `emitDecoratorMetadata`.
     pub emit_decorator_metadata: Option<bool>,
+    /// tsconfig `strictNullChecks` (effective value — tsc defaults it from
+    /// `strict`). With `false`, decorator metadata drops `null`/`undefined`
+    /// union constituents like tsc (`string | null` → `String`). Default `true`.
+    pub strict_null_checks: Option<bool>,
     /// tsconfig `useDefineForClassFields` (default `false` — Angular's setting).
     pub use_define_for_class_fields: Option<bool>,
     /// Run the Angular JIT transforms (downlevel decorators + signal initializer
@@ -63,6 +67,13 @@ pub struct TransformOptions {
     /// as a string. Default: unset — URLs are emitted verbatim. The vitest
     /// plugin passes `"inline"`.
     pub keep_styles_query: Option<String>,
+    /// Module name the emitted runtime-helper imports (`_decorate`, …) are
+    /// loaded from (default `"@oxc-project/runtime"`, a dependency of this
+    /// package). Pass an absolute path to the resolved package directory when
+    /// the consumer's module resolution can't reach this package's dependencies
+    /// from the transformed file's location (pnpm's isolated `node_modules`).
+    /// The jest plugin does this automatically.
+    pub helper_module_name: Option<String>,
     /// Master switch for TS→JS + decorator lowering (default `true`; set `false`
     /// only to inspect the pre-lowering TypeScript AST).
     pub lower: Option<bool>,
@@ -115,6 +126,9 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
         emit_decorator_metadata: options
             .emit_decorator_metadata
             .unwrap_or(defaults.emit_decorator_metadata),
+        strict_null_checks: options
+            .strict_null_checks
+            .unwrap_or(defaults.strict_null_checks),
         use_define_for_class_fields: options
             .use_define_for_class_fields
             .unwrap_or(defaults.use_define_for_class_fields),
@@ -133,6 +147,7 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
         target: options.target.unwrap_or(defaults.target),
         keep_styles: options.keep_styles.unwrap_or(defaults.keep_styles),
         keep_styles_query: options.keep_styles_query.or(defaults.keep_styles_query),
+        helper_module_name: options.helper_module_name.or(defaults.helper_module_name),
         lower: options.lower.unwrap_or(defaults.lower),
         coverage: options.coverage.unwrap_or(defaults.coverage),
         coverage_variable: options.coverage_variable.or(defaults.coverage_variable),

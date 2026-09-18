@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transform, type TransformOptions } from '@oxc-angular-testing/transform';
 import {
@@ -90,6 +91,109 @@ function verifyCoverageSchemaOnce(): void {
     );
   }
 }
+
+// A local rebuild of the native binding (or of this plugin) doesn't bump the
+// package version, so `transformVersion` alone serves STALE cached transforms
+// during development — a rebuilt `.node` with the old cache looks like "the fix
+// didn't work". Fold in the binding files' size+mtime and this file's own mtime
+// (statted once per worker); in a published install these are fixed, so cache
+// behavior there is unchanged.
+const bindingStamp = (() => {
+  const parts: string[] = [];
+  try {
+    parts.push(String(fs.statSync(__filename).mtimeMs));
+  } catch {
+    /* keep what we have */
+  }
+  try {
+    const dir = path.dirname(require.resolve('@oxc-angular-testing/transform/package.json'));
+    // Sorted: readdir order is filesystem-dependent, and the stamp must be
+    // deterministic for stable cache keys.
+    for (const f of fs.readdirSync(dir).sort()) {
+      if (f.endsWith('.node')) {
+        const s = fs.statSync(path.join(dir, f));
+        parts.push(`${f}:${s.size}:${s.mtimeMs}`);
+      }
+    }
+  } catch {
+    /* prebuilt binding packages — version alone suffices */
+  }
+  return parts.join(',');
+})();
+
+// Runtime helpers (`_decorate`, `_async_to_generator`, …) are emitted as
+// `require("@oxc-project/runtime/helpers/<name>")` — a dependency of
+// `@oxc-angular-testing/transform`, NOT of the consumer. Node (and jest-resolve)
+// resolve that specifier from the *transformed file's* directory, so under a
+// package manager with isolated node_modules (pnpm) the bare specifier is
+// unresolvable from application code and every decorated file fails to load.
+// Resolve the package once, relative to the transform package itself, and emit
+// helpers by absolute path instead — correct under every layout (hoisted npm,
+// isolated pnpm, linked local checkouts). CommonJS output only: `require()`
+// resolves extensionless absolute paths, while an ESM `import` would not (and
+// a Windows drive path is not a valid ESM specifier), so ESM output keeps the
+// bare specifier. Resolving a known helper file (rather than the package root)
+// honors the exports map, which rewrites `./helpers/*` into `./src/helpers/*`;
+// stripping `/helpers/decorate.js` leaves the prefix oxc appends
+// `helpers/<name>` to. `null` (resolution failed) falls back to the bare
+// specifier — the pre-existing behavior.
+let cjsHelperModuleName: string | null | undefined;
+function resolveCjsHelperModuleName(): string | undefined {
+  if (cjsHelperModuleName === undefined) {
+    try {
+      const transformDir = path.dirname(
+        require.resolve('@oxc-angular-testing/transform/package.json'),
+      );
+      const decorate = require.resolve('@oxc-project/runtime/helpers/decorate', {
+        paths: [transformDir],
+      });
+      cjsHelperModuleName = path.dirname(path.dirname(decorate));
+    } catch {
+      cjsHelperModuleName = null;
+    }
+  }
+  return cjsHelperModuleName ?? undefined;
+}
+
+// jest remaps stack-frame NAMES through the sourcemap `names` array
+// (stack-utils/source-map consumers rewrite the frame label when the mapping
+// carries a name). tsc's transpileModule — the ts-jest baseline — emits maps
+// with NO names, so frames keep their runtime labels; oxc emits names, which
+// relabels frames (e.g. `Object.<anonymous>` → `Object.getStackAndItsDigest`
+// at a call site) and breaks code that fingerprints stacks. Strip the names
+// and the 5th VLQ field of every segment for tsc parity. VLQ values are
+// self-delimiting (continuation bit), so truncating a segment to its first
+// four values needs no re-encoding and leaves positions untouched.
+function stripSourceMapNames(map: {
+  names?: string[];
+  mappings?: string;
+}): typeof map {
+  if (!map.names || map.names.length === 0) return map;
+  const keepFirst4 = (segment: string): string => {
+    let values = 0;
+    for (let i = 0; i < segment.length; i++) {
+      // Continuation bit clear → a VLQ value ends at this character.
+      const digit = B64_INDEX[segment.charCodeAt(i)];
+      if (digit === undefined) return segment; // malformed — leave untouched
+      if ((digit & 32) === 0 && ++values === 4) return segment.slice(0, i + 1);
+    }
+    return segment;
+  };
+  map.names = [];
+  if (map.mappings) {
+    map.mappings = map.mappings
+      .split(';')
+      .map((line) => line.split(',').map(keepFirst4).join(','))
+      .join(';');
+  }
+  return map;
+}
+const B64_INDEX: Record<number, number> = {};
+'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  .split('')
+  .forEach((c, i) => {
+    B64_INDEX[c.charCodeAt(0)] = i;
+  });
 
 /** The per-file `options` jest passes to a transformer (the slice we read). */
 interface JestTransformOptions {
@@ -225,19 +329,34 @@ export function createTransformer(
     return result;
   };
 
+  // The helper module name actually baked into the output: an explicit
+  // `transform.helperModuleName` override wins, else the resolved absolute
+  // path for CJS output only (ESM keeps the bare specifier). Shared by
+  // process() and getCacheKey() so the cache is keyed on exactly what emits.
+  const effectiveHelperModuleName = (moduleKind: 'commonjs' | 'esm'): string | undefined =>
+    transformerOptions.transform?.helperModuleName ??
+    (moduleKind === 'commonjs' ? resolveCjsHelperModuleName() : undefined);
+
   return {
     canInstrument: true,
     // Include the native transform version so jest's transform cache is
     // invalidated when the binding (and thus its output) changes.
     getCacheKey(sourceText, sourcePath, options) {
-      const { derived } = resolve(options?.config);
+      const { derived, moduleKind } = resolve(options?.config);
       return crypto
         .createHash('sha1')
         .update(transformVersion)
         .update('\0')
+        .update(bindingStamp)
+        .update('\0')
         .update(JSON.stringify(transformerOptions))
         .update('\0')
         .update(JSON.stringify(derived))
+        .update('\0')
+        // The EFFECTIVE helper name is baked into the output — a moved/
+        // reinstalled node_modules must not serve stale absolute paths from
+        // jest's cache. ESM output (bare specifier) hashes nothing extra.
+        .update(effectiveHelperModuleName(moduleKind) ?? '')
         .update('\0')
         .update(options?.instrument ? '1' : '0')
         .update('\0')
@@ -262,6 +381,10 @@ export function createTransformer(
       const opts: TransformOptions = {
         ...derived,
         ...transformerOptions.transform,
+        // Effective helper name (override, else absolute path for CJS — see
+        // effectiveHelperModuleName); placed after the transform spread because
+        // it already folds the override in.
+        helperModuleName: effectiveHelperModuleName(moduleKind),
         module: moduleKind,
         // Coverage precedence (identical in the vitest plugin): an explicit
         // top-level `coverage` option wins (true OR false); otherwise derive from
@@ -281,7 +404,10 @@ export function createTransformer(
       if (out.errors && out.errors.length > 0) {
         throw new Error(`@oxc-angular-testing/jest: ${out.errors.join('\n')}`);
       }
-      return { code: out.code, map: out.map ? JSON.parse(out.map) : undefined };
+      return {
+        code: out.code,
+        map: out.map ? stripSourceMapNames(JSON.parse(out.map)) : undefined,
+      };
     },
   };
 }

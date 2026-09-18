@@ -214,3 +214,176 @@ test('every statement counter is emitted — no dead counters (exported fn-init 
     }
   }
 });
+
+test('helperModuleName rewrites the runtime-helper import prefix', () => {
+  // Legacy decorator lowering imports `_decorate` from `@oxc-project/runtime` —
+  // a dependency of this package, not of the consumer. `helperModuleName` lets
+  // a runner emit the require via a resolved path instead (pnpm's isolated
+  // node_modules can't reach our dependency from the transformed file).
+  const src = 'function dec(t: any) { return t; }\n@dec\nexport class C {}\n';
+  const bare = transform(src, 'c.ts', { module: 'commonjs', jitTransforms: false });
+  assert.equal(bare.errors.length, 0, bare.errors.join('\n'));
+  assert.match(bare.code, /require\("@oxc-project\/runtime\/helpers\/decorate"\)/);
+  const abs = transform(src, 'c.ts', {
+    module: 'commonjs',
+    jitTransforms: false,
+    helperModuleName: '/abs/rt/src',
+  });
+  assert.equal(abs.errors.length, 0, abs.errors.join('\n'));
+  assert.match(abs.code, /require\("\/abs\/rt\/src\/helpers\/decorate"\)/);
+  assert.ok(!abs.code.includes('"@oxc-project/runtime'), 'no bare specifier remains');
+});
+
+test('BigInt literals pass through untouched below es2020 (tsc transpile parity)', () => {
+  // tsc in transpile-only mode never errors on `1n` at a lower target (TS2737 is
+  // a checker diagnostic); oxc's env flag would hard-error. We match tsc.
+  const out = transform('export const big = 123n + BigInt(4);\n', 'big.ts', {
+    module: 'commonjs',
+    target: 'es2019',
+    jitTransforms: false,
+  });
+  assert.equal(out.errors.length, 0, out.errors.join('\n'));
+  assert.match(out.code, /123n/);
+});
+
+test('exported function declarations hoist exports assignment above requires (tsc parity)', () => {
+  // tsc emits `exports.f = f;` directly after the `__esModule` marker — before
+  // any `require` — because function declarations hoist. A circular importer
+  // that re-enters this module mid-evaluation must already see the function
+  // (ts-jest/tsc behavior). Classes/consts can't hoist and keep the late
+  // assignment + `void 0` header.
+  const src = [
+    "import { o } from './o';",
+    'export function f() { return o(); }',
+    'export default function d() { return 1; }',
+    'function g() { return 2; }',
+    'export { g };',
+    'export class C {}',
+    '',
+  ].join('\n');
+  const out = transform(src, 'm.ts', { module: 'commonjs', jitTransforms: false });
+  assert.equal(out.errors.length, 0, out.errors.join('\n'));
+  const code = out.code;
+  const reqIdx = code.indexOf('require("./o")');
+  assert.ok(reqIdx > 0, code);
+  for (const assign of ['exports.f = f', 'exports.default = d', 'exports.g = g']) {
+    const i = code.indexOf(assign);
+    assert.ok(i >= 0 && i < reqIdx, `${assign} must be hoisted above the require:\n${code}`);
+  }
+  // The class keeps tsc's shape: in the `void 0` header, assigned late.
+  assert.match(code, /exports\.C = void 0/);
+  assert.ok(code.indexOf('exports.C = C') > reqIdx, code);
+  // Hoisted function exports are NOT in the `void 0` header.
+  const header = code.slice(0, reqIdx);
+  assert.ok(!/exports\.(f|g|default) = void 0/.test(header), header);
+});
+
+test('strictNullChecks=false serializes decorator metadata like tsc SNC-off', () => {
+  // tsc's serializer drops null/undefined union constituents when
+  // strictNullChecks is OFF (`string | null` → String); strict mode yields
+  // Object. Compare both modes against tsc's documented behavior.
+  const src = [
+    'function dec(): any { return () => {}; }',
+    '@dec()',
+    'export class Svc {',
+    '  @dec() a: string | null = null;',
+    '  @dec() c: string | number | null = null;',
+    '  constructor(@dec() x: Date | null, @dec() y?: number) {}',
+    '  @dec() m(z: string | undefined): string | null { return z ?? null; }',
+    '}',
+  ].join('\n');
+  const opts = {
+    module: 'commonjs',
+    jitTransforms: false,
+    experimentalDecorators: true,
+    emitDecoratorMetadata: true,
+    target: 'es2019',
+  };
+  const off = transform(src, 's.ts', { ...opts, strictNullChecks: false });
+  assert.equal(off.errors.length, 0, off.errors.join('\n'));
+  assert.match(off.code, /"design:type", String/); // a: string|null → String
+  assert.match(off.code, /"design:returntype", String/); // string|null → String
+  assert.match(off.code, /"design:paramtypes", \[String\]/); // [string|undefined] → [String]
+  // string|number|null → still a two-type union → Object.
+  assert.match(off.code, /"design:type", Object/);
+  // Date|null → Date reference (guarded or bare), NOT Object.
+  const ctor = off.code.match(/"design:paramtypes", \[([^\]]*Date[^\]]*)\]/);
+  assert.ok(ctor, `ctor paramtypes serialize Date:\n${off.code}`);
+
+  // Default (strict) keeps the current oxc behavior: unions with null → Object.
+  const on = transform(src, 's.ts', opts);
+  assert.ok(!/"design:type", String/.test(on.code), on.code);
+});
+
+test('jest.mock hoists BELOW the @jest/globals import (no TDZ after CJS rewrite)', () => {
+  const src = [
+    "import { jest } from '@jest/globals';",
+    "import { helper } from './helper';",
+    "jest.mock('./x', () => ({}));",
+    'helper();',
+  ].join('\n');
+  const out = transform(src, 't.ts', { module: 'commonjs', jitTransforms: false, hoistMock: 'jest' });
+  assert.equal(out.errors.length, 0, out.errors.join('\n'));
+  const code = out.code;
+  const globalsIdx = code.indexOf('require("@jest/globals")');
+  const mockIdx = code.indexOf('.jest.mock("./x"');
+  const helperIdx = code.indexOf('require("./helper")');
+  assert.ok(globalsIdx >= 0 && mockIdx >= 0 && helperIdx >= 0, code);
+  assert.ok(globalsIdx < mockIdx, `@jest/globals require above the hoisted mock:\n${code}`);
+  assert.ok(mockIdx < helperIdx, `hoisted mock above other requires:\n${code}`);
+});
+
+test('enum members initialized from another same-file string enum fold like tsc', () => {
+  // tsc constant-folds `B.X = A.Y` to the string literal, emitting the
+  // string-enum form; an unfolded reference makes oxc emit the numeric-enum
+  // form with a bogus reverse mapping — Object.values(B) then contains phantom
+  // member NAMES, breaking `it.each(Object.values(E))`-style consumers.
+  const src = [
+    'export enum BaseEnum {',
+    "  RED = 'red',",
+    "  BLUE = 'blue',",
+    '}',
+    'export enum ExtendedEnum {',
+    "  NONE = 'none',",
+    '  RED = BaseEnum.RED,',
+    '  BLUE = BaseEnum.BLUE,',
+    '}',
+  ].join('\n');
+  const out = transform(src, 'e.ts', { module: 'commonjs', jitTransforms: false, target: 'es2019' });
+  assert.equal(out.errors.length, 0, out.errors.join('\n'));
+  const mod = { exports: {} as Record<string, Record<string, string>> };
+  new Function('exports', 'module', out.code)(mod.exports, mod);
+  assert.deepEqual(mod.exports.ExtendedEnum, {
+    NONE: 'none',
+    RED: 'red',
+    BLUE: 'blue',
+  });
+  // Cross-file references stay as runtime expressions (per-file transpile
+  // cannot fold them; matches tsc transpileModule).
+  const cross = transform(
+    "import { A } from './a';\nexport enum B { X = A.Y }\n",
+    'b.ts',
+    { module: 'commonjs', jitTransforms: false, target: 'es2019' },
+  );
+  assert.match(cross.code, /A\.Y/);
+});
+
+test('side-effect import + named import of the same module keeps the require var', () => {
+  // `import './m'; import { x } from './m';` — per-source dedup must not let
+  // the bare side-effect require swallow the `const m_1 = require("./m")`
+  // declaration the rewritten references (`m_1.x`) depend on.
+  const out = transform(
+    "import './m';\nimport { x } from './m';\nexport const y = x;\n",
+    's.ts',
+    { module: 'commonjs', jitTransforms: false },
+  );
+  assert.equal(out.errors.length, 0, out.errors.join('\n'));
+  const sandbox = { exports: {} as Record<string, unknown> };
+  new Function('require', 'exports', 'module', out.code)(
+    () => ({ x: 42 }),
+    sandbox.exports,
+    sandbox,
+  );
+  assert.equal(sandbox.exports.y, 42);
+  assert.equal(out.code.match(/require\("\.\/m"\)/g)?.length, 1, out.code);
+});

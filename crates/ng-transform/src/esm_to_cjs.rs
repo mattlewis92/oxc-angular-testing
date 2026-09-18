@@ -293,6 +293,35 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
     let old_body = std::mem::replace(&mut program.body, ast.vec());
     let mut exported_names: Vec<String> = Vec::new(); // for the `void 0` header
     let mut body: Vec<Statement<'a>> = Vec::new();
+    // Top-level function declarations hoist, and tsc hoists their export
+    // assignments with them: `exports.f = f;` is emitted ABOVE the requires, so
+    // a circular importer re-entering this module mid-evaluation already sees
+    // the function (classes/consts can't hoist and keep the late assignment +
+    // `void 0` header). Collect the names first; the rewriters below route
+    // these assignments into `hoisted_exports` instead of the body.
+    let mut top_level_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in &old_body {
+        use oxc_ast::ast::{Declaration as D, ExportDefaultDeclarationKind as DK};
+        let fn_id = match stmt {
+            Statement::FunctionDeclaration(f) => f.id.as_ref(),
+            Statement::ExportNamedDeclaration(e) => match &e.declaration {
+                Some(D::FunctionDeclaration(f)) => f.id.as_ref(),
+                _ => None,
+            },
+            Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                DK::FunctionDeclaration(f) => f.id.as_ref(),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(id) = fn_id {
+            top_level_fns.insert(id.name.as_str().to_string());
+        }
+    }
+    let mut hoisted_exports: Vec<Statement<'a>> = Vec::new();
+    // Dedicated raw require vars for re-export getters (per source), separate
+    // from the (possibly interop-wrapped) import vars — see rewrite_export_named.
+    let mut reexport_vars: HashMap<String, String> = HashMap::new();
     // Sources whose `const <var> = require(...)` has already been emitted, so a
     // module that is both imported and re-exported is required only once.
     let mut emitted_requires: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -313,10 +342,11 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
             Statement::ExportNamedDeclaration(export) => {
                 rewrite_export_named(
                     export.unbox(),
-                    &mut module_vars,
+                    &mut reexport_vars,
                     &mut used_names,
                     &mut exported_names,
-                    &mut emitted_requires,
+                    &mut hoisted_exports,
+                    &top_level_fns,
                     &replacements,
                     ast,
                     &mut body,
@@ -326,6 +356,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
                 rewrite_export_default(
                     export.unbox(),
                     &mut exported_names,
+                    &mut hoisted_exports,
                     &mut used_names,
                     ast,
                     &mut body,
@@ -364,6 +395,12 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
     let mut final_body = ast.vec();
     if has_esm_syntax {
         final_body.push(es_module_marker(ast));
+    }
+    // Hoisted-function export assignments come first (tsc parity — see the
+    // `top_level_fns` collection above); they are deliberately absent from the
+    // `void 0` header, exactly as tsc emits them.
+    for s in hoisted_exports {
+        final_body.push(s);
     }
     if !exported_names.is_empty() {
         final_body.push(void0_hoist(&exported_names, ast));
@@ -758,8 +795,16 @@ fn rewrite_import<'a>(
 ) {
     let source = import.source.value.as_str();
     let span = import.span;
-    if import.specifiers.is_none() {
-        // side-effect import → `require("…");` (skip if already required).
+    if import.specifiers.is_none() && !module_vars.contains_key(source) {
+        // Side-effect import of a source no other statement binds → bare
+        // `require("…");` (skip if already required). When the source IS bound
+        // elsewhere (`import './m'; import { x } from './m'`), fall through and
+        // emit the canonical `const <var> = require(…)` HERE instead: the
+        // binding statement may come later, and the per-source dedup would then
+        // skip its declaration — leaving rewritten references (`m_1.x`) with no
+        // variable at all. Declaring at the earliest position also preserves
+        // evaluation (mock-registration) order, matching tsc's per-statement
+        // requires.
         if emitted.insert(source.to_string()) {
             out.push(ast.statement_expression(span, require_call_at(source, span, ast)));
         }
@@ -795,10 +840,11 @@ fn rewrite_import<'a>(
 #[allow(clippy::too_many_arguments)]
 fn rewrite_export_named<'a>(
     export: oxc_ast::ast::ExportNamedDeclaration<'a>,
-    module_vars: &mut HashMap<String, String>,
+    reexport_vars: &mut HashMap<String, String>,
     used_names: &mut HashMap<String, u32>,
     exported_names: &mut Vec<String>,
-    emitted: &mut std::collections::HashSet<String>,
+    hoisted: &mut Vec<Statement<'a>>,
+    top_level_fns: &std::collections::HashSet<String>,
     replacements: &HashMap<String, Replacement>,
     ast: AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
@@ -806,19 +852,28 @@ fn rewrite_export_named<'a>(
     // `export { a, b as c } from "./m"` — re-export.
     if let Some(source) = &export.source {
         let src = source.value.as_str();
-        let ns_var = module_vars
-            .entry(src.to_string())
-            .or_insert_with(|| unique_module_var(src, used_names))
-            .clone();
-        // Require the source once (it may also have been imported).
-        if emitted.insert(src.to_string()) {
-            out.push(const_decl_at(
-                &ns_var,
-                require_call_at(src, export.span, ast),
-                export.span,
-                ast,
-            ));
-        }
+        // tsc parity: re-export getters read the RAW module namespace — never a
+        // shared `__importDefault`/`__importStar`-wrapped import variable. The
+        // wrapper is a snapshot whose named properties don't exist when the
+        // target lacks `__esModule` (a CJS dep, or a `jest.mock` factory), and
+        // getters must stay live across circular module graphs. tsc emits a
+        // separate raw `require` var for the re-export (`m_1` wrapped for the
+        // default import, `m_2` raw for the getters); mirror that with a
+        // dedicated per-source raw var, deduped only among re-exports.
+        let ns_var = match reexport_vars.get(src) {
+            Some(existing) => existing.clone(),
+            None => {
+                let var = unique_module_var(src, used_names);
+                reexport_vars.insert(src.to_string(), var.clone());
+                out.push(const_decl_at(
+                    &var,
+                    require_call_at(src, export.span, ast),
+                    export.span,
+                    ast,
+                ));
+                var
+            }
+        };
         for spec in &export.specifiers {
             let local = spec.local.name();
             let exported = spec.exported.name();
@@ -832,13 +887,20 @@ fn rewrite_export_named<'a>(
         return;
     }
 
-    // `export <decl>` — keep the declaration, then assign each binding.
+    // `export <decl>` — keep the declaration, then assign each binding. A
+    // function declaration hoists, so its assignment hoists too (tsc parity);
+    // classes/vars assign in place and get the `void 0` header.
     if let Some(decl) = export.declaration {
+        let is_fn = matches!(decl, oxc_ast::ast::Declaration::FunctionDeclaration(_));
         let names = declaration_binding_names(&decl);
         out.push(Statement::from(decl));
         for name in names {
-            out.push(assign_export_stmt(&name, ident(&name, ast), ast));
-            exported_names.push(name);
+            if is_fn {
+                hoisted.push(assign_export_stmt(&name, ident(&name, ast), ast));
+            } else {
+                out.push(assign_export_stmt(&name, ident(&name, ast), ast));
+                exported_names.push(name);
+            }
         }
         return;
     }
@@ -859,14 +921,23 @@ fn rewrite_export_named<'a>(
                     ast,
                 ));
             }
-            // Genuine local binding → eager assignment.
+            // Genuine local binding → eager assignment; hoisted when the local
+            // is a top-level function declaration (tsc parity).
             None => {
-                out.push(assign_export_stmt(
-                    exported.as_str(),
-                    ident(local.as_str(), ast),
-                    ast,
-                ));
-                exported_names.push(exported.as_str().to_string());
+                if top_level_fns.contains(local.as_str()) {
+                    hoisted.push(assign_export_stmt(
+                        exported.as_str(),
+                        ident(local.as_str(), ast),
+                        ast,
+                    ));
+                } else {
+                    out.push(assign_export_stmt(
+                        exported.as_str(),
+                        ident(local.as_str(), ast),
+                        ast,
+                    ));
+                    exported_names.push(exported.as_str().to_string());
+                }
             }
         }
     }
@@ -875,29 +946,33 @@ fn rewrite_export_named<'a>(
 fn rewrite_export_default<'a>(
     export: oxc_ast::ast::ExportDefaultDeclaration<'a>,
     exported_names: &mut Vec<String>,
+    hoisted: &mut Vec<Statement<'a>>,
     used_names: &mut HashMap<String, u32>,
     ast: AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
 ) {
     use oxc_ast::ast::ExportDefaultDeclarationKind as K;
-    exported_names.push("default".to_string());
     match export.declaration {
         // An ANONYMOUS `export default function/class` must be given a name: a
         // nameless function/class *declaration* is a SyntaxError, and emitting
         // `exports.default = undefined` would lose the value. Match tsc: synthesize
         // a `default_N` binding and assign it. A named declaration keeps its name.
+        // A function declaration hoists, so its `exports.default` assignment
+        // hoists too and skips the `void 0` header (tsc parity).
         K::FunctionDeclaration(mut func) => {
             let name = ensure_default_name(&mut func.id, used_names, ast);
             out.push(Statement::FunctionDeclaration(func));
-            out.push(assign_export_stmt("default", ident(&name, ast), ast));
+            hoisted.push(assign_export_stmt("default", ident(&name, ast), ast));
         }
         K::ClassDeclaration(mut class) => {
+            exported_names.push("default".to_string());
             let name = ensure_default_name(&mut class.id, used_names, ast);
             out.push(Statement::ClassDeclaration(class));
             out.push(assign_export_stmt("default", ident(&name, ast), ast));
         }
         expr => {
             // An expression: `export default <expr>;`
+            exported_names.push("default".to_string());
             let expression = expr.into_expression();
             out.push(assign_export_stmt("default", expression, ast));
         }

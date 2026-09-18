@@ -38,9 +38,27 @@ test('derives merged options through an extends chain', () => {
     module: 'commonjs',
     experimentalDecorators: true,
     emitDecoratorMetadata: true,
+    // Effective value: no strict / strictNullChecks in the config → false.
+    strictNullChecks: false,
     // TS defaults useDefineForClassFields to true at effective target >= ES2022.
     useDefineForClassFields: true,
   });
+});
+
+test('derives the EFFECTIVE strictNullChecks the way tsc does', () => {
+  const dir = fixtureDir();
+  // `strict: true` implies strictNullChecks unless explicitly overridden.
+  const strictOnly = writeConfig(dir, 'strict.json', { compilerOptions: { strict: true } });
+  assert.equal(deriveTransformOptions(strictOnly).strictNullChecks, true);
+  // Explicit strictNullChecks wins over strict (this repo shape: strict codebase
+  // that has not turned on null-checking).
+  const sncOff = writeConfig(dir, 'snc-off.json', {
+    compilerOptions: { strict: true, strictNullChecks: false },
+  });
+  assert.equal(deriveTransformOptions(sncOff).strictNullChecks, false);
+  // Neither → tsc's default: false.
+  const neither = writeConfig(dir, 'neither.json', { compilerOptions: {} });
+  assert.equal(deriveTransformOptions(neither).strictNullChecks, false);
 });
 
 test('maps module kinds: commonjs stays commonjs, everything else is esm', () => {
