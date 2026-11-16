@@ -20,12 +20,9 @@
 
 use std::collections::HashSet;
 
-use oxc_ast::AstBuilder;
-use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, Class, Decorator, Expression, ImportDeclarationSpecifier,
-    ImportOrExportKind, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program, PropertyKey,
-    Statement, TSTypeParameterInstantiation, WithClause,
-};
+use oxc_allocator::{ArenaVec, GetAllocator};
+use oxc_ast::ast::*;
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 use oxc_traverse::{Traverse, TraverseCtx};
 
@@ -108,7 +105,7 @@ fn normalize_url(url: &str) -> String {
 fn key_name<'a>(key: &PropertyKey<'a>) -> Option<&'a str> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str()),
+        PropertyKey::StringLiteral(s) => s.value.as_str(),
         _ => None,
     }
 }
@@ -116,27 +113,21 @@ fn key_name<'a>(key: &PropertyKey<'a>) -> Option<&'a str> {
 impl<'a> ResourceTransform {
     /// Replace a matched `templateUrl` property's key/value in place. Returns
     /// the new value expression for the (now `template`) property.
-    fn template_value(&mut self, url: &str, ast: AstBuilder<'a>) -> Expression<'a> {
+    fn template_value(&mut self, url: &str, ast: &AstBuilder<'a>) -> Expression<'a> {
         let normalized = normalize_url(url);
         if self.use_import {
             let var = format!("{RESOURCE_PREFIX}{}", self.counter);
             self.counter += 1;
-            let arena_var = ast.allocator.alloc_str(&var);
+            let arena_var = ast.allocator().alloc_str(&var);
             self.pending_imports.push((var, normalized));
-            ast.expression_identifier(SPAN, arena_var)
+            Expression::new_identifier(SPAN, arena_var, ast)
         } else {
-            let arena_src = ast.allocator.alloc_str(&normalized);
-            let src = ast.expression_string_literal(SPAN, arena_src, None);
-            let callee = ast.expression_identifier(SPAN, "require");
-            let mut args = ast.vec();
+            let arena_src = ast.allocator().alloc_str(&normalized);
+            let src = Expression::new_string_literal(SPAN, arena_src, None, ast);
+            let callee = Expression::new_identifier(SPAN, "require", ast);
+            let mut args = ArenaVec::new_in(ast);
             args.push(Argument::from(src));
-            ast.expression_call(
-                SPAN,
-                callee,
-                None::<TSTypeParameterInstantiation>,
-                args,
-                false,
-            )
+            Expression::new_call_expression(SPAN, callee, None, args, false, ast)
         }
     }
 
@@ -147,7 +138,7 @@ impl<'a> ResourceTransform {
     /// `require(...)` call (require mode). The bundler's CSS pipeline compiles
     /// the stylesheet; a query like vite's `inline` makes the default export
     /// the CSS text.
-    fn style_value(&mut self, url: &str, ast: AstBuilder<'a>) -> Expression<'a> {
+    fn style_value(&mut self, url: &str, ast: &AstBuilder<'a>) -> Expression<'a> {
         let mut specifier = normalize_url(url);
         if let Some(query) = &self.style_query {
             specifier.push(if specifier.contains('?') { '&' } else { '?' });
@@ -156,29 +147,23 @@ impl<'a> ResourceTransform {
         if self.use_import {
             let var = format!("{}{}__", self.style_prefix, self.style_counter);
             self.style_counter += 1;
-            let arena_var = ast.allocator.alloc_str(&var);
+            let arena_var = ast.allocator().alloc_str(&var);
             self.pending_imports.push((var, specifier));
-            ast.expression_identifier(SPAN, arena_var)
+            Expression::new_identifier(SPAN, arena_var, ast)
         } else {
-            let arena_src = ast.allocator.alloc_str(&specifier);
-            let src = ast.expression_string_literal(SPAN, arena_src, None);
-            let callee = ast.expression_identifier(SPAN, "require");
-            let mut args = ast.vec();
+            let arena_src = ast.allocator().alloc_str(&specifier);
+            let src = Expression::new_string_literal(SPAN, arena_src, None, ast);
+            let callee = Expression::new_identifier(SPAN, "require", ast);
+            let mut args = ArenaVec::new_in(ast);
             args.push(Argument::from(src));
-            ast.expression_call(
-                SPAN,
-                callee,
-                None::<TSTypeParameterInstantiation>,
-                args,
-                false,
-            )
+            Expression::new_call_expression(SPAN, callee, None, args, false, ast)
         }
     }
 
     /// Rewrite the `@Component({...})` metadata object: inline `templateUrl`,
     /// strip `moduleId`, and strip (default) or rewrite (`keep_styles`) the
     /// style metadata.
-    fn process_metadata(&mut self, obj: &mut ObjectExpression<'a>, ast: AstBuilder<'a>) {
+    fn process_metadata(&mut self, obj: &mut ObjectExpression<'a>, ast: &AstBuilder<'a>) {
         // `keep_styles`: collect the static style URLs up front. If any style URL
         // is dynamic — or inline `styles` has a shape we cannot merge into — the
         // style properties are left untouched (same policy as a dynamic
@@ -198,9 +183,9 @@ impl<'a> ResourceTransform {
         // Index (in the rebuilt property list) of the first style-related
         // property, and the inline `styles` elements captured during the rebuild.
         let mut styles_slot: Option<usize> = None;
-        let mut inline_elements = ast.vec::<ArrayExpressionElement<'a>>();
+        let mut inline_elements = ArenaVec::<ArrayExpressionElement<'a>>::new_in(ast);
 
-        let old = std::mem::replace(&mut obj.properties, ast.vec());
+        let old = std::mem::replace(&mut obj.properties, ArenaVec::new_in(ast));
         for prop in old {
             let ObjectPropertyKind::ObjectProperty(mut p) = prop else {
                 obj.properties.push(prop);
@@ -236,8 +221,10 @@ impl<'a> ResourceTransform {
                         if key == "styles" {
                             // Take ownership of the value (the property itself is
                             // dropped) so its elements can be spliced through.
-                            let value =
-                                std::mem::replace(&mut p.value, ast.expression_null_literal(SPAN));
+                            let value = std::mem::replace(
+                                &mut p.value,
+                                Expression::new_null_literal(SPAN, ast),
+                            );
                             collect_inline_elements(value, &mut inline_elements, ast);
                         }
                         self.changed = true;
@@ -252,9 +239,9 @@ impl<'a> ResourceTransform {
             // after — Angular's `resolveComponentResources` appends fetched
             // styleUrl styles to the end of the inline `styles` array.
             inline_elements.extend(url_styles.into_iter().map(ArrayExpressionElement::from));
-            let array = ast.expression_array(SPAN, inline_elements);
-            let key = PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "styles"));
-            let prop = ast.object_property_kind_object_property(
+            let array = Expression::new_array_expression(SPAN, inline_elements, ast);
+            let key = PropertyKey::StaticIdentifier(IdentifierName::boxed(SPAN, "styles", ast));
+            let prop = ObjectPropertyKind::new_object_property(
                 SPAN,
                 oxc_ast::ast::PropertyKind::Init,
                 key,
@@ -262,6 +249,7 @@ impl<'a> ResourceTransform {
                 false,
                 false,
                 false,
+                ast,
             );
             obj.properties.insert(slot, prop);
         }
@@ -338,11 +326,11 @@ fn plan_styles(obj: &ObjectExpression<'_>) -> StylePlan {
 fn collect_inline_elements<'a>(
     value: Expression<'a>,
     elements: &mut oxc_allocator::Vec<'a, ArrayExpressionElement<'a>>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) {
     match value {
         Expression::ArrayExpression(mut arr) => {
-            let inner = std::mem::replace(&mut arr.elements, ast.vec());
+            let inner = std::mem::replace(&mut arr.elements, ArenaVec::new_in(ast));
             elements.extend(inner);
         }
         other => elements.push(ArrayExpressionElement::from(other)),
@@ -354,13 +342,14 @@ fn collect_inline_elements<'a>(
 /// (interpolated template, identifier, …) returns `None` and is left un-inlined.
 fn static_string_value(expr: &Expression<'_>) -> Option<String> {
     match expr {
-        Expression::StringLiteral(s) => Some(s.value.as_str().to_string()),
+        Expression::StringLiteral(s) => s.value.as_str().map(str::to_string),
         Expression::TemplateLiteral(t) if t.expressions.is_empty() && t.quasis.len() == 1 => t
             .quasis[0]
             .value
             .cooked
             .as_ref()
-            .map(|c| c.as_str().to_string()),
+            .and_then(|c| c.as_str())
+            .map(str::to_string),
         _ => None,
     }
 }
@@ -369,9 +358,9 @@ fn static_string_value(expr: &Expression<'_>) -> Option<String> {
 fn rewrite_to_template<'a>(
     prop: &mut ObjectProperty<'a>,
     value: Expression<'a>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) {
-    prop.key = PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "template"));
+    prop.key = PropertyKey::StaticIdentifier(IdentifierName::boxed(SPAN, "template", ast));
     prop.value = value;
 }
 
@@ -381,7 +370,7 @@ impl<'a> Traverse<'a, ()> for ResourceTransform {
             let Statement::ImportDeclaration(import) = stmt else {
                 continue;
             };
-            if import.source.value.as_str() != ANGULAR_CORE {
+            if import.source.value != ANGULAR_CORE {
                 continue;
             }
             let Some(specifiers) = &import.specifiers else {
@@ -409,7 +398,7 @@ impl<'a> Traverse<'a, ()> for ResourceTransform {
         if self.component_locals.is_empty() && self.component_namespaces.is_empty() {
             return;
         }
-        let ast = ctx.ast;
+        let ast = &ctx.ast;
         for dec in &mut node.decorators {
             if let Some(obj) =
                 component_metadata(dec, &self.component_locals, &self.component_namespaces)
@@ -423,24 +412,25 @@ impl<'a> Traverse<'a, ()> for ResourceTransform {
         if self.pending_imports.is_empty() {
             return;
         }
-        let ast = ctx.ast;
+        let ast = &ctx.ast;
         let pending = std::mem::take(&mut self.pending_imports);
         for (index, (var, source)) in pending.into_iter().enumerate() {
-            let arena_var = ast.allocator.alloc_str(&var);
-            let arena_src = ast.allocator.alloc_str(&source);
-            let local = ast.binding_identifier(SPAN, arena_var);
+            let arena_var = ast.allocator().alloc_str(&var);
+            let arena_src = ast.allocator().alloc_str(&source);
+            let local = BindingIdentifier::new(SPAN, arena_var, ast);
             let default_spec =
-                ast.import_declaration_specifier_import_default_specifier(SPAN, local);
-            let mut specs = ast.vec();
+                ImportDeclarationSpecifier::new_import_default_specifier(SPAN, local, ast);
+            let mut specs = ArenaVec::new_in(ast);
             specs.push(default_spec);
-            let source_lit = ast.string_literal(SPAN, arena_src, None);
-            let decl = ast.alloc_import_declaration(
+            let source_lit = StringLiteral::new(SPAN, arena_src, None, ast);
+            let decl = ImportDeclaration::boxed(
                 SPAN,
                 Some(specs),
                 source_lit,
                 None,
-                None::<WithClause>,
+                None,
                 ImportOrExportKind::Value,
+                ast,
             );
             node.body.insert(index, Statement::ImportDeclaration(decl));
         }

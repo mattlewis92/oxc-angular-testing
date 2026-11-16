@@ -28,16 +28,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use oxc_allocator::CloneIn;
-use oxc_ast::AstBuilder;
-use oxc_ast::NONE;
-use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, BindingPattern, CallExpression, Class, ClassElement,
-    Declaration, Decorator, Expression, FormalParameter, FormalParameterKind,
-    ImportDeclarationSpecifier, ImportOrExportKind, MethodDefinitionKind, ObjectPropertyKind,
-    Program, PropertyDefinitionType, PropertyKey, PropertyKind, Statement, TSType, TSTypeName,
-    VariableDeclaration, WithClause,
-};
+use oxc_allocator::{ArenaVec, CloneIn, GetAllocator};
+use oxc_ast::ast::*;
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 use oxc_traverse::{Traverse, TraverseCtx};
 
@@ -136,7 +129,7 @@ impl Default for JitTransform {
 fn key_name<'a>(key: &PropertyKey<'a>) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_string()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str().to_string()),
+        PropertyKey::StringLiteral(s) => s.value.as_str().map(str::to_string),
         _ => None,
     }
 }
@@ -163,77 +156,95 @@ fn initializer_call<'a, 'b>(value: &'b Expression<'a>) -> Option<&'b CallExpress
     }
 }
 
-fn ident<'a>(name: &str, ast: AstBuilder<'a>) -> Expression<'a> {
-    ast.expression_identifier(SPAN, ast.allocator.alloc_str(name))
+fn ident<'a>(name: &str, ast: &AstBuilder<'a>) -> Expression<'a> {
+    Expression::new_identifier(SPAN, ast.allocator().alloc_str(name), ast)
 }
 
-fn undefined<'a>(ast: AstBuilder<'a>) -> Expression<'a> {
+fn undefined<'a>(ast: &AstBuilder<'a>) -> Expression<'a> {
     ident("undefined", ast)
 }
 
-fn string_lit<'a>(value: &str, ast: AstBuilder<'a>) -> Expression<'a> {
-    ast.expression_string_literal(SPAN, ast.allocator.alloc_str(value), None)
+fn string_lit<'a>(value: &str, ast: &AstBuilder<'a>) -> Expression<'a> {
+    Expression::new_string_literal(SPAN, ast.allocator().alloc_str(value), None, ast)
 }
 
-fn bool_lit<'a>(value: bool, ast: AstBuilder<'a>) -> Expression<'a> {
-    ast.expression_boolean_literal(SPAN, value)
+fn bool_lit<'a>(value: bool, ast: &AstBuilder<'a>) -> Expression<'a> {
+    Expression::new_boolean_literal(SPAN, value, ast)
 }
 
-fn prop<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>) -> ObjectPropertyKind<'a> {
-    ast.object_property_kind_object_property(
+fn prop<'a>(name: &str, value: Expression<'a>, ast: &AstBuilder<'a>) -> ObjectPropertyKind<'a> {
+    ObjectPropertyKind::new_object_property(
         SPAN,
         PropertyKind::Init,
-        PropertyKey::StaticIdentifier(
-            ast.alloc_identifier_name(SPAN, ast.allocator.alloc_str(name)),
-        ),
+        PropertyKey::StaticIdentifier(IdentifierName::boxed(
+            SPAN,
+            ast.allocator().alloc_str(name),
+            ast,
+        )),
         value,
         false,
         false,
         false,
+        ast,
     )
 }
 
-fn object<'a>(props: Vec<ObjectPropertyKind<'a>>, ast: AstBuilder<'a>) -> Expression<'a> {
-    let mut v = ast.vec();
+fn object<'a>(props: Vec<ObjectPropertyKind<'a>>, ast: &AstBuilder<'a>) -> Expression<'a> {
+    let mut v = ArenaVec::new_in(ast);
     for p in props {
         v.push(p);
     }
-    ast.expression_object(SPAN, v)
+    Expression::new_object_expression(SPAN, v, ast)
 }
 
-fn array<'a>(elements: Vec<Expression<'a>>, ast: AstBuilder<'a>) -> Expression<'a> {
-    let mut v = ast.vec();
+fn array<'a>(elements: Vec<Expression<'a>>, ast: &AstBuilder<'a>) -> Expression<'a> {
+    let mut v = ArenaVec::new_in(ast);
     for e in elements {
         v.push(ArrayExpressionElement::from(e));
     }
-    ast.expression_array(SPAN, v)
+    Expression::new_array_expression(SPAN, v, ast)
 }
 
 /// `() => <body>` (expression-bodied arrow).
-fn arrow<'a>(body: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
-    let params = ast.formal_parameters(
+fn arrow<'a>(body: Expression<'a>, ast: &AstBuilder<'a>) -> Expression<'a> {
+    let params = FormalParameters::boxed(
         SPAN,
         FormalParameterKind::ArrowFormalParameters,
-        ast.vec(),
-        NONE,
+        ArenaVec::new_in(ast),
+        None,
+        ast,
     );
-    let mut stmts = ast.vec();
-    stmts.push(ast.statement_expression(SPAN, body));
-    let fn_body = ast.function_body(SPAN, ast.vec(), stmts);
-    ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, fn_body)
+    // Expression-bodied (`() => body`): oxc 0.157's `ArrowFunctionBody` holds
+    // the expression directly (it replaced the old `expression: true` flag +
+    // single-`ExpressionStatement` `FunctionBody` encoding).
+    Expression::new_arrow_function_expression(
+        SPAN,
+        false, // async
+        None,
+        params,
+        None,
+        ArrowFunctionBody::from(body),
+        ast,
+    )
 }
 
 /// Build a `static <name> = <value>;` class element.
-fn static_property<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>) -> ClassElement<'a> {
-    let key = PropertyKey::StaticIdentifier(
-        ast.alloc_identifier_name(SPAN, ast.allocator.alloc_str(name)),
-    );
-    ast.class_element_property_definition(
+fn static_property<'a>(
+    name: &str,
+    value: Expression<'a>,
+    ast: &AstBuilder<'a>,
+) -> ClassElement<'a> {
+    let key = PropertyKey::StaticIdentifier(IdentifierName::boxed(
+        SPAN,
+        ast.allocator().alloc_str(name),
+        ast,
+    ));
+    ClassElement::new_property_definition(
         SPAN,
         PropertyDefinitionType::PropertyDefinition,
-        ast.vec(),
+        ArenaVec::new_in(ast),
         key,
-        NONE,
+        None,
         Some(value),
         false, // computed
         true,  // static
@@ -243,6 +254,7 @@ fn static_property<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>) -
         false, // definite
         false, // readonly
         None,  // accessibility
+        ast,
     )
 }
 
@@ -250,17 +262,22 @@ fn static_property<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>) -
 // Type → runtime expression (for `ctorParameters` `type`)
 // ---------------------------------------------------------------------------
 
-fn type_name_to_expr<'a>(name: &TSTypeName<'a>, ast: AstBuilder<'a>) -> Option<Expression<'a>> {
+fn type_name_to_expr<'a>(name: &TSTypeName<'a>, ast: &AstBuilder<'a>) -> Option<Expression<'a>> {
     match name {
         TSTypeName::IdentifierReference(id) => Some(ident(id.name.as_str(), ast)),
         TSTypeName::QualifiedName(q) => {
             let object = type_name_to_expr(&q.left, ast)?;
             Some(
-                ast.member_expression_static(
+                MemberExpression::new_static_member_expression(
                     SPAN,
                     object,
-                    ast.identifier_name(SPAN, ast.allocator.alloc_str(q.right.name.as_str())),
+                    IdentifierName::new(
+                        SPAN,
+                        ast.allocator().alloc_str(q.right.name.as_str()),
+                        ast,
+                    ),
                     false,
+                    ast,
                 )
                 .into(),
             )
@@ -282,7 +299,7 @@ fn type_root_name<'a>(name: &'a TSTypeName<'a>) -> Option<&'a str> {
 fn type_to_expr<'a>(
     ts_type: &TSType<'a>,
     value_names: &HashSet<String>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Expression<'a> {
     match ts_type {
         TSType::TSTypeReference(r) => {
@@ -375,21 +392,21 @@ fn collect_value_names(stmt: &Statement<'_>, out: &mut HashSet<String>) {
         // `const Svc = class {}` / `const X = …` bind runtime values; a param typed
         // `: Svc` resolves to a value, so tsc emits `Svc` rather than `Object`.
         Statement::VariableDeclaration(v) => collect_var_names(v, out),
-        Statement::ExportNamedDeclaration(e) => match &e.declaration {
-            Some(Declaration::ClassDeclaration(c)) => {
+        Statement::ExportDeclaration(e) => match &e.declaration {
+            Declaration::ClassDeclaration(c) => {
                 if let Some(id) = &c.id {
                     out.insert(id.name.as_str().to_string());
                 }
             }
-            Some(Declaration::TSEnumDeclaration(en)) => {
+            Declaration::TSEnumDeclaration(en) => {
                 out.insert(en.id.name.as_str().to_string());
             }
-            Some(Declaration::FunctionDeclaration(f)) => {
+            Declaration::FunctionDeclaration(f) => {
                 if let Some(id) = &f.id {
                     out.insert(id.name.as_str().to_string());
                 }
             }
-            Some(Declaration::VariableDeclaration(v)) => collect_var_names(v, out),
+            Declaration::VariableDeclaration(v) => collect_var_names(v, out),
             _ => {}
         },
         _ => {}
@@ -413,17 +430,21 @@ fn collect_var_names(v: &VariableDeclaration<'_>, out: &mut HashSet<String>) {
 
 /// Consume a decorator and produce its `{ type: <fn>, args?: [...] }` metadata
 /// object for `propDecorators` / `ctorParameters`.
-fn decorator_metadata<'a>(dec: Decorator<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
+fn decorator_metadata<'a>(dec: Decorator<'a>, ast: &AstBuilder<'a>) -> Expression<'a> {
     match dec.expression {
         Expression::CallExpression(call) => {
             let call = call.unbox();
             let mut props = vec![prop("type", call.callee, ast)];
             if !call.arguments.is_empty() {
-                let mut elems = ast.vec();
+                let mut elems = ArenaVec::new_in(ast);
                 for arg in call.arguments {
                     elems.push(ArrayExpressionElement::from(arg));
                 }
-                props.push(prop("args", ast.expression_array(SPAN, elems), ast));
+                props.push(prop(
+                    "args",
+                    Expression::new_array_expression(SPAN, elems, ast),
+                    ast,
+                ));
             }
             object(props, ast)
         }
@@ -440,7 +461,7 @@ impl<'a> Traverse<'a, ()> for JitTransform {
             let Statement::ImportDeclaration(import) = stmt else {
                 continue;
             };
-            if import.source.value.as_str() != ANGULAR_CORE {
+            if import.source.value != ANGULAR_CORE {
                 continue;
             }
             let Some(specifiers) = &import.specifiers else {
@@ -471,7 +492,7 @@ impl<'a> Traverse<'a, ()> for JitTransform {
         if self.ng_locals.is_empty() && self.ng_namespace.is_none() {
             return;
         }
-        let ast = ctx.ast;
+        let ast = &ctx.ast;
         let class_is_angular = self.class_is_angular(node);
 
         // --- 1. Initializer-API transform: synthesize decorators for signals.
@@ -516,14 +537,14 @@ impl<'a> Traverse<'a, ()> for JitTransform {
         if self.needed_imports.is_empty() {
             return;
         }
-        let ast = ctx.ast;
+        let ast = &ctx.ast;
         let mut to_add: Vec<String> = self.needed_imports.iter().cloned().collect();
         // Keep only names not present as an existing imported specifier.
         let already: HashSet<String> = node
             .body
             .iter()
             .filter_map(|s| match s {
-                Statement::ImportDeclaration(i) if i.source.value.as_str() == ANGULAR_CORE => {
+                Statement::ImportDeclaration(i) if i.source.value == ANGULAR_CORE => {
                     i.specifiers.as_ref()
                 }
                 _ => None,
@@ -549,7 +570,7 @@ impl<'a> Traverse<'a, ()> for JitTransform {
         // skip it and emit a dedicated `import { … } from '@angular/core'` below.
         let existing = node.body.iter_mut().find_map(|s| match s {
             Statement::ImportDeclaration(i)
-                if i.source.value.as_str() == ANGULAR_CORE && !import_has_namespace(i) =>
+                if i.source.value == ANGULAR_CORE && !import_has_namespace(i) =>
             {
                 Some(i)
             }
@@ -557,36 +578,41 @@ impl<'a> Traverse<'a, ()> for JitTransform {
         });
         match existing {
             Some(import) => {
-                let specifiers = import.specifiers.get_or_insert_with(|| ast.vec());
+                let specifiers = import
+                    .specifiers
+                    .get_or_insert_with(|| ArenaVec::new_in(ast));
                 for name in &to_add {
-                    let arena = ast.allocator.alloc_str(name);
-                    specifiers.push(ast.import_declaration_specifier_import_specifier(
+                    let arena = ast.allocator().alloc_str(name);
+                    specifiers.push(ImportDeclarationSpecifier::new_import_specifier(
                         SPAN,
-                        ast.module_export_name_identifier_name(SPAN, arena),
-                        ast.binding_identifier(SPAN, arena),
+                        ModuleExportName::new_identifier_name(SPAN, arena, ast),
+                        BindingIdentifier::new(SPAN, arena, ast),
                         ImportOrExportKind::Value,
+                        ast,
                     ));
                 }
             }
             None => {
-                let mut specifiers = ast.vec();
+                let mut specifiers = ArenaVec::new_in(ast);
                 for name in &to_add {
-                    let arena = ast.allocator.alloc_str(name);
-                    specifiers.push(ast.import_declaration_specifier_import_specifier(
+                    let arena = ast.allocator().alloc_str(name);
+                    specifiers.push(ImportDeclarationSpecifier::new_import_specifier(
                         SPAN,
-                        ast.module_export_name_identifier_name(SPAN, arena),
-                        ast.binding_identifier(SPAN, arena),
+                        ModuleExportName::new_identifier_name(SPAN, arena, ast),
+                        BindingIdentifier::new(SPAN, arena, ast),
                         ImportOrExportKind::Value,
+                        ast,
                     ));
                 }
-                let source = ast.string_literal(SPAN, ANGULAR_CORE, None);
-                let decl = ast.alloc_import_declaration(
+                let source = StringLiteral::new(SPAN, ANGULAR_CORE, None, ast);
+                let decl = ImportDeclaration::boxed(
                     SPAN,
                     Some(specifiers),
                     source,
                     None,
-                    None::<WithClause>,
+                    None,
                     ImportOrExportKind::Value,
+                    ast,
                 );
                 node.body.insert(0, Statement::ImportDeclaration(decl));
             }
@@ -597,7 +623,7 @@ impl<'a> Traverse<'a, ()> for JitTransform {
 impl JitTransform {
     /// For each signal-initialized member, synthesize and prepend the Angular
     /// decorator(s) onto the member.
-    fn synthesize_signal_decorators<'a>(&mut self, node: &mut Class<'a>, ast: AstBuilder<'a>) {
+    fn synthesize_signal_decorators<'a>(&mut self, node: &mut Class<'a>, ast: &AstBuilder<'a>) {
         // Collect synthesized decorators per member index first (avoids borrow issues).
         let mut synthesized: Vec<(usize, Vec<Decorator<'a>>)> = Vec::new();
         for (idx, element) in node.body.body.iter().enumerate() {
@@ -632,11 +658,11 @@ impl JitTransform {
         for (idx, decs) in synthesized {
             if let ClassElement::PropertyDefinition(p) = &mut node.body.body[idx] {
                 // Prepend so downlevel emits them first.
-                let mut new = ast.vec();
+                let mut new = ArenaVec::new_in(ast);
                 for d in decs {
                     new.push(d);
                 }
-                for d in std::mem::replace(&mut p.decorators, ast.vec()) {
+                for d in std::mem::replace(&mut p.decorators, ArenaVec::new_in(ast)) {
                     new.push(d);
                 }
                 p.decorators = new;
@@ -692,7 +718,9 @@ impl JitTransform {
                         && key_name(&op.key).as_deref() == Some("alias")
                         && let Expression::StringLiteral(s) = &op.value
                     {
-                        return Some(s.value.as_str().to_string());
+                        // A lone-surrogate alias (not valid UTF-8) is treated as
+                        // absent; no real Angular input name contains one.
+                        return s.value.as_str().map(str::to_string);
                     }
                 }
             }
@@ -706,7 +734,7 @@ impl JitTransform {
     fn extract_transform<'a>(
         &self,
         call: &CallExpression<'a>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> Option<Expression<'a>> {
         for arg in &call.arguments {
             if let Argument::ObjectExpression(obj) = arg {
@@ -714,7 +742,7 @@ impl JitTransform {
                     if let ObjectPropertyKind::ObjectProperty(op) = p
                         && key_name(&op.key).as_deref() == Some("transform")
                     {
-                        return Some(op.value.clone_in(ast.allocator));
+                        return Some(op.value.clone_in(ast.allocator()));
                     }
                 }
             }
@@ -727,7 +755,7 @@ impl JitTransform {
         init: Initializer,
         alias: &str,
         call: &CallExpression<'a>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> Vec<Decorator<'a>> {
         let mut decs = Vec::new();
         match init {
@@ -756,7 +784,7 @@ impl JitTransform {
         required: bool,
         with_transform: bool,
         transform: Option<Expression<'a>>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> Decorator<'a> {
         self.use_ng_symbol("Input");
         let mut props = vec![
@@ -770,18 +798,20 @@ impl JitTransform {
             let value = transform.unwrap_or_else(|| undefined(ast));
             props.push(prop("transform", value, ast));
         }
-        let mut args = ast.vec();
+        let mut args = ArenaVec::new_in(ast);
         args.push(Argument::from(object(props, ast)));
-        let call = ast.expression_call(SPAN, ident("Input", ast), NONE, args, false);
-        ast.decorator(SPAN, call)
+        let call =
+            Expression::new_call_expression(SPAN, ident("Input", ast), None, args, false, ast);
+        Decorator::new(SPAN, call, ast)
     }
 
-    fn output_decorator<'a>(&mut self, binding: &str, ast: AstBuilder<'a>) -> Decorator<'a> {
+    fn output_decorator<'a>(&mut self, binding: &str, ast: &AstBuilder<'a>) -> Decorator<'a> {
         self.use_ng_symbol("Output");
-        let mut args = ast.vec();
+        let mut args = ArenaVec::new_in(ast);
         args.push(Argument::from(string_lit(binding, ast)));
-        let call = ast.expression_call(SPAN, ident("Output", ast), NONE, args, false);
-        ast.decorator(SPAN, call)
+        let call =
+            Expression::new_call_expression(SPAN, ident("Output", ast), None, args, false, ast);
+        Decorator::new(SPAN, call, ast)
     }
 
     /// `viewChild(locator, opts?)` → `@ViewChild(locator, { ...opts, isSignal: true })`,
@@ -793,28 +823,33 @@ impl JitTransform {
         &mut self,
         kind: &'static str,
         call: &CallExpression<'a>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> Decorator<'a> {
         self.use_ng_symbol(kind);
-        let alloc = ast.allocator;
+        let alloc = ast.allocator();
 
         // Options: `{ ...<original options arg>, isSignal: true }`.
-        let mut opts_props = ast.vec();
+        let mut opts_props = ArenaVec::new_in(ast);
         if let Some(opts) = call.arguments.get(1).and_then(Argument::as_expression) {
-            opts_props.push(ast.object_property_kind_spread_property(SPAN, opts.clone_in(alloc)));
+            opts_props.push(ObjectPropertyKind::new_spread_property(
+                SPAN,
+                opts.clone_in(alloc),
+                ast,
+            ));
         }
         opts_props.push(prop("isSignal", bool_lit(true, ast), ast));
-        let opts_obj = ast.expression_object(SPAN, opts_props);
+        let opts_obj = Expression::new_object_expression(SPAN, opts_props, ast);
 
-        let mut args = ast.vec();
+        let mut args = ArenaVec::new_in(ast);
         // Predicate: the first argument (class ref / string / forwardRef), as-is.
         if let Some(predicate) = call.arguments.first() {
             args.push(predicate.clone_in(alloc));
         }
         args.push(Argument::from(opts_obj));
 
-        let decorator_call = ast.expression_call(SPAN, ident(kind, ast), NONE, args, false);
-        ast.decorator(SPAN, decorator_call)
+        let decorator_call =
+            Expression::new_call_expression(SPAN, ident(kind, ast), None, args, false, ast);
+        Decorator::new(SPAN, decorator_call, ast)
     }
 
     /// Process the constructor: strip Angular param decorators, collect
@@ -822,7 +857,7 @@ impl JitTransform {
     fn downlevel_constructor<'a>(
         &mut self,
         node: &mut Class<'a>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> Option<Vec<(Expression<'a>, bool)>> {
         let ctor = node.body.body.iter_mut().find_map(|el| match el {
             ClassElement::MethodDefinition(m) if m.kind == MethodDefinitionKind::Constructor => {
@@ -845,12 +880,12 @@ impl JitTransform {
     fn process_param<'a>(
         &mut self,
         param: &mut FormalParameter<'a>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> (Expression<'a>, bool) {
-        let mut keep = ast.vec();
+        let mut keep = ArenaVec::new_in(ast);
         let mut angular: Vec<Decorator<'a>> = Vec::new();
         let mut has_inject = false;
-        for dec in std::mem::replace(&mut param.decorators, ast.vec()) {
+        for dec in std::mem::replace(&mut param.decorators, ArenaVec::new_in(ast)) {
             match self.decorator_ng_name(&dec) {
                 Some(name) => {
                     // `@Inject(token)` supplies the DI token directly; Angular only
@@ -898,7 +933,7 @@ impl JitTransform {
     fn downlevel_members<'a>(
         &mut self,
         node: &mut Class<'a>,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
     ) -> Option<Vec<ObjectPropertyKind<'a>>> {
         let mut entries: Vec<(String, Expression<'a>)> = Vec::new();
         for element in &mut node.body.body {
@@ -928,9 +963,9 @@ impl JitTransform {
             if decorators.is_empty() {
                 continue;
             }
-            let mut keep = ast.vec();
+            let mut keep = ArenaVec::new_in(ast);
             let mut metas: Vec<Expression<'a>> = Vec::new();
-            for dec in std::mem::replace(decorators, ast.vec()) {
+            for dec in std::mem::replace(decorators, ArenaVec::new_in(ast)) {
                 if self.decorator_ng_name(&dec).is_some() {
                     metas.push(decorator_metadata(dec, ast));
                 } else {

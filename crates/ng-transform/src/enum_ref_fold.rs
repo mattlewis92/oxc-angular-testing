@@ -18,10 +18,11 @@
 
 use std::collections::HashMap;
 
-use oxc_ast::AstBuilder;
+use oxc_allocator::GetAllocator;
 use oxc_ast::ast::{
     Declaration, Expression, Program, Statement, TSEnumDeclaration, TSEnumMemberName,
 };
+use oxc_ast::builder::AstBuilder;
 use oxc_span::GetSpan;
 
 #[derive(Clone, Debug)]
@@ -30,7 +31,7 @@ enum EnumValue {
     Num(f64),
 }
 
-pub fn fold_same_file_enum_refs<'a>(program: &mut Program<'a>, ast: AstBuilder<'a>) {
+pub fn fold_same_file_enum_refs<'a>(program: &mut Program<'a>, ast: &AstBuilder<'a>) {
     // enum name → member name → literal value, populated in source order: a
     // reference folds only when the referenced enum is declared ABOVE it —
     // matching runtime evaluation order (forward references throw at runtime,
@@ -39,8 +40,8 @@ pub fn fold_same_file_enum_refs<'a>(program: &mut Program<'a>, ast: AstBuilder<'
     for stmt in &mut program.body {
         let decl = match stmt {
             Statement::TSEnumDeclaration(d) => &mut **d,
-            Statement::ExportNamedDeclaration(e) => match &mut e.declaration {
-                Some(Declaration::TSEnumDeclaration(d)) => &mut **d,
+            Statement::ExportDeclaration(e) => match &mut e.declaration {
+                Declaration::TSEnumDeclaration(d) => &mut **d,
                 _ => continue,
             },
             _ => continue,
@@ -55,7 +56,9 @@ fn member_name(id: &TSEnumMemberName) -> Option<String> {
     match id {
         TSEnumMemberName::Identifier(n) => Some(n.name.to_string()),
         TSEnumMemberName::String(s) | TSEnumMemberName::ComputedString(s) => {
-            Some(s.value.to_string())
+            // A lone-surrogate key isn't representable as a Rust `String`;
+            // treat it as unknowable (never folded).
+            s.value.as_str().map(str::to_string)
         }
         TSEnumMemberName::ComputedTemplateString(_) => None,
     }
@@ -64,7 +67,7 @@ fn member_name(id: &TSEnumMemberName) -> Option<String> {
 fn fold_enum<'a>(
     decl: &mut TSEnumDeclaration<'a>,
     known: &mut HashMap<String, HashMap<String, EnumValue>>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) {
     let mut values: HashMap<String, EnumValue> = HashMap::new();
     // Next auto-increment value; `None` once a member's value is unknowable
@@ -75,12 +78,18 @@ fn fold_enum<'a>(
             && let Some(EnumValue::Str(s)) = resolve_ref(init, known)
         {
             let span = init.span();
-            member.initializer =
-                Some(ast.expression_string_literal(span, ast.allocator.alloc_str(&s), None));
+            member.initializer = Some(Expression::new_string_literal(
+                span,
+                ast.allocator().alloc_str(&s),
+                None,
+                ast,
+            ));
         }
         let value = match &member.initializer {
             None => auto.map(EnumValue::Num),
-            Some(Expression::StringLiteral(s)) => Some(EnumValue::Str(s.value.to_string())),
+            Some(Expression::StringLiteral(s)) => {
+                s.value.as_str().map(|v| EnumValue::Str(v.to_string()))
+            }
             Some(Expression::NumericLiteral(n)) => Some(EnumValue::Num(n.value)),
             Some(_) => None,
         };
@@ -120,7 +129,7 @@ fn resolve_ref(
             };
             known
                 .get(obj.name.as_str())?
-                .get(key.value.as_str())
+                .get(key.value.as_str()?)
                 .cloned()
         }
         _ => None,
