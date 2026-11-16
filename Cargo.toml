@@ -25,6 +25,9 @@ oxc_span = "0.157"
 oxc_syntax = "0.157"
 oxc_transformer = "0.157"
 oxc_traverse = "0.157"
+# Same major oxc_codegen 0.157 builds its maps with; the transform rewrites
+# codegen's `SourceMap` tokens directly (see `finish_source_map`).
+oxc_sourcemap = "9"
 # Exact pin: `instrument_program` sits behind the upstream-"experimental"
 # `ast-api` feature, so its signature may change in any minor release.
 oxc_coverage_instrument = { version = "=0.20.0", features = ["ast-api"] }
