@@ -328,7 +328,7 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         code,
         source_map: ret
             .map
-            .map(|map| offset_source_map(&map.to_json_string(), prefix_lines)),
+            .map(|map| finish_source_map(map, prefix_lines, options.source_map_names)),
         coverage_map,
         errors,
     }
@@ -393,46 +393,155 @@ fn assemble(
     (format!("{prefix}{code}"), prefix_lines)
 }
 
-/// Shift every mapping in a source map down by `lines` generated lines.
+/// Serialize codegen's source map, shifting every mapping down by `lines`
+/// generated lines and, unless `keep_names`, dropping `names`.
 ///
-/// We prepend `"use strict";` + interop helpers as raw text after codegen, so
-/// the generated code starts `lines` rows lower than the map (built against the
-/// codegen output) assumes. A VLQ `mappings` string encodes generated lines as
-/// `;`-separated groups, so prepending `lines` semicolons inserts that many
-/// empty leading lines — without disturbing the (file-relative) source/name
-/// deltas, which only advance on real segments. No-op when `lines == 0`.
-fn offset_source_map(map_json: &str, lines: usize) -> String {
-    if lines == 0 {
-        return map_json.to_string();
+/// We prepend `"use strict";` + interop helpers (and the coverage preamble) as
+/// raw text after codegen, so the generated code starts `lines` rows lower than
+/// the map (built against the codegen output) assumes. Both adjustments are
+/// done on the tokens before the single VLQ encode — no JSON re-parse, and no
+/// JS-side `mappings` rewrite in the jest plugin. Dropping a name clears only
+/// the token's name id; every position is preserved. `token_chunks` (parallel
+/// encode hints carrying prev-name ids) are discarded so the encoder works from
+/// the rewritten tokens alone. No-op fast path when there is nothing to do.
+fn finish_source_map(map: oxc_sourcemap::SourceMap<'_>, lines: usize, keep_names: bool) -> String {
+    if lines == 0 && keep_names {
+        return map.to_json_string();
     }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(map_json) else {
-        return map_json.to_string();
-    };
-    if let Some(mappings) = value.get_mut("mappings").and_then(|m| m.as_str()) {
-        let shifted = format!("{};{mappings}", ";".repeat(lines - 1));
-        value["mappings"] = serde_json::Value::String(shifted);
+    let lines = u32::try_from(lines).unwrap_or(u32::MAX);
+    let mut parts = map.into_parts();
+    parts.tokens = parts
+        .tokens
+        .iter()
+        .map(|t| {
+            oxc_sourcemap::Token::new(
+                t.get_dst_line() + lines,
+                t.get_dst_col(),
+                t.get_src_line(),
+                t.get_src_col(),
+                t.get_source_id(),
+                if keep_names { t.get_name_id() } else { None },
+            )
+        })
+        .collect();
+    parts.token_chunks = None;
+    if !keep_names {
+        parts.names.clear();
     }
-    value.to_string()
+    oxc_sourcemap::SourceMap::from_parts(parts).to_json_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn offset_prepends_semicolons_without_touching_source_deltas() {
-        let map = r#"{"version":3,"sources":["m.ts"],"names":[],"mappings":"AAAA,CAAC;AACD"}"#;
-        let out = offset_source_map(map, 4);
-        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let mappings = value["mappings"].as_str().unwrap();
-        // 4 leading empty lines, then the original mappings unchanged.
-        assert_eq!(mappings, ";;;;AAAA,CAAC;AACD");
+    use oxc_sourcemap::{SourceMap, Token};
+
+    fn sample_map() -> SourceMap<'static> {
+        SourceMap::new(
+            None,
+            vec!["foo".into()],
+            None,
+            vec!["m.ts".into()],
+            vec![],
+            vec![
+                Token::new(0, 0, 0, 0, Some(0), Some(0)),
+                Token::new(0, 4, 0, 6, Some(0), None),
+                Token::new(1, 2, 3, 1, Some(0), Some(0)),
+            ]
+            .into_boxed_slice(),
+            None,
+        )
+    }
+
+    fn positions(json: &str) -> Vec<(u32, u32, u32, u32, Option<u32>)> {
+        SourceMap::from_json_string(json)
+            .unwrap()
+            .get_tokens()
+            .map(|t| {
+                (
+                    t.get_dst_line(),
+                    t.get_dst_col(),
+                    t.get_src_line(),
+                    t.get_src_col(),
+                    t.get_name_id(),
+                )
+            })
+            .collect()
     }
 
     #[test]
-    fn offset_zero_is_a_no_op() {
-        let map = r#"{"version":3,"sources":["m.ts"],"names":[],"mappings":"AAAA"}"#;
-        assert_eq!(offset_source_map(map, 0), map);
+    fn finish_shifts_lines_without_touching_source_deltas() {
+        let out = finish_source_map(sample_map(), 4, true);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // 4 leading empty lines, then the original mappings unchanged.
+        let plain = sample_map().to_json_string();
+        let plain: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        assert_eq!(
+            value["mappings"].as_str().unwrap(),
+            format!(";;;;{}", plain["mappings"].as_str().unwrap())
+        );
+        assert_eq!(value["names"], serde_json::json!(["foo"]));
+    }
+
+    #[test]
+    fn finish_is_a_no_op_with_nothing_to_do() {
+        assert_eq!(
+            finish_source_map(sample_map(), 0, true),
+            sample_map().to_json_string()
+        );
+    }
+
+    #[test]
+    fn finish_drops_names_but_keeps_positions() {
+        let out = finish_source_map(sample_map(), 2, false);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["names"], serde_json::json!([]));
+        // Every segment is 4 VLQ fields now: no 5th (name) field anywhere.
+        let mappings = value["mappings"].as_str().unwrap();
+        assert_eq!(mappings, ";;AAAA,IAAM;EAGL");
+        assert_eq!(
+            positions(&out),
+            vec![(2, 0, 0, 0, None), (2, 4, 0, 6, None), (3, 2, 3, 1, None)]
+        );
+    }
+
+    #[test]
+    fn source_map_names_false_matches_names_true_positions() {
+        // The CJS rewrite of an imported binding (`helper` → `h_1.helper`) is
+        // what makes oxc record a name; unrenamed identifiers get none.
+        let src = "import { helper } from './h';\nexport const x = helper();\n";
+        let base = TransformOptions {
+            module: ModuleKind::CommonJs,
+            jit_transforms: false,
+            ..TransformOptions::default()
+        };
+        let with = transform(src, "m.ts", &base).source_map.unwrap();
+        let without = transform(
+            src,
+            "m.ts",
+            &TransformOptions {
+                source_map_names: false,
+                ..base
+            },
+        )
+        .source_map
+        .unwrap();
+        let with_value: serde_json::Value = serde_json::from_str(&with).unwrap();
+        assert!(
+            !with_value["names"].as_array().unwrap().is_empty(),
+            "sanity: oxc emits names by default"
+        );
+        let without_value: serde_json::Value = serde_json::from_str(&without).unwrap();
+        assert_eq!(without_value["names"], serde_json::json!([]));
+        let strip = |v: Vec<(u32, u32, u32, u32, Option<u32>)>| {
+            v.into_iter()
+                .map(|(a, b, c, d, _)| (a, b, c, d))
+                .collect::<Vec<_>>()
+        };
+        let without_positions = positions(&without);
+        assert!(without_positions.iter().all(|t| t.4.is_none()));
+        assert_eq!(strip(positions(&with)), strip(without_positions));
     }
 
     #[test]

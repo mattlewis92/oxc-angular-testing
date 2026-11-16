@@ -97,6 +97,13 @@ export interface TransformOptions {
   coverageVariable?: string
   /** Emit a source map (default `true`). */
   sourceMap?: boolean
+  /**
+   * Keep the source map's `names` (default `true`). `false` drops them (and
+   * each mapping's name field) for parity with tsc's `transpileModule`, whose
+   * maps carry none — jest relabels stack frames through `names`. Positions
+   * are unaffected. The jest plugin passes `false`.
+   */
+  sourceMapNames?: boolean
 }
 
 /** Result of a transform. */

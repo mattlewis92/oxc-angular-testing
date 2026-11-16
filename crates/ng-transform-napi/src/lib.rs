@@ -83,6 +83,11 @@ pub struct TransformOptions {
     pub coverage_variable: Option<String>,
     /// Emit a source map (default `true`).
     pub source_map: Option<bool>,
+    /// Keep the source map's `names` (default `true`). `false` drops them (and
+    /// each mapping's name field) for parity with tsc's `transpileModule`, whose
+    /// maps carry none — jest relabels stack frames through `names`. Positions
+    /// are unaffected. The jest plugin passes `false`.
+    pub source_map_names: Option<bool>,
 }
 
 /// Result of a transform.
@@ -152,6 +157,9 @@ fn to_ng_options(options: Option<TransformOptions>) -> NgOptions {
         coverage: options.coverage.unwrap_or(defaults.coverage),
         coverage_variable: options.coverage_variable.or(defaults.coverage_variable),
         source_map: options.source_map.unwrap_or(defaults.source_map),
+        source_map_names: options
+            .source_map_names
+            .unwrap_or(defaults.source_map_names),
     }
 }
 

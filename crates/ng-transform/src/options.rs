@@ -142,6 +142,13 @@ pub struct TransformOptions {
     pub coverage_variable: Option<String>,
     /// Emit a source map.
     pub source_map: bool,
+    /// Keep the source map's `names` (each mapping's 5th VLQ field). `true` by
+    /// default. The jest plugin sets `false` for parity with tsc's
+    /// `transpileModule` (the ts-jest baseline), whose maps carry no names:
+    /// jest relabels stack frames through `names`, so oxc's names change frame
+    /// labels (e.g. `Object.<anonymous>` → `Object.foo`) and break code that
+    /// fingerprints stacks. Positions are unaffected.
+    pub source_map_names: bool,
 }
 
 impl Default for TransformOptions {
@@ -163,6 +170,7 @@ impl Default for TransformOptions {
             coverage: false,
             coverage_variable: None,
             source_map: true,
+            source_map_names: true,
         }
     }
 }

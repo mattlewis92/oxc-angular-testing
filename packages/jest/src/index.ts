@@ -155,46 +155,6 @@ function resolveCjsHelperModuleName(): string | undefined {
   return cjsHelperModuleName ?? undefined;
 }
 
-// jest remaps stack-frame NAMES through the sourcemap `names` array
-// (stack-utils/source-map consumers rewrite the frame label when the mapping
-// carries a name). tsc's transpileModule — the ts-jest baseline — emits maps
-// with NO names, so frames keep their runtime labels; oxc emits names, which
-// relabels frames (e.g. `Object.<anonymous>` → `Object.getStackAndItsDigest`
-// at a call site) and breaks code that fingerprints stacks. Strip the names
-// and the 5th VLQ field of every segment for tsc parity. VLQ values are
-// self-delimiting (continuation bit), so truncating a segment to its first
-// four values needs no re-encoding and leaves positions untouched.
-function stripSourceMapNames(map: {
-  names?: string[];
-  mappings?: string;
-}): typeof map {
-  if (!map.names || map.names.length === 0) return map;
-  const keepFirst4 = (segment: string): string => {
-    let values = 0;
-    for (let i = 0; i < segment.length; i++) {
-      // Continuation bit clear → a VLQ value ends at this character.
-      const digit = B64_INDEX[segment.charCodeAt(i)];
-      if (digit === undefined) return segment; // malformed — leave untouched
-      if ((digit & 32) === 0 && ++values === 4) return segment.slice(0, i + 1);
-    }
-    return segment;
-  };
-  map.names = [];
-  if (map.mappings) {
-    map.mappings = map.mappings
-      .split(';')
-      .map((line) => line.split(',').map(keepFirst4).join(','))
-      .join(';');
-  }
-  return map;
-}
-const B64_INDEX: Record<number, number> = {};
-'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  .split('')
-  .forEach((c, i) => {
-    B64_INDEX[c.charCodeAt(0)] = i;
-  });
-
 /** The per-file `options` jest passes to a transformer (the slice we read). */
 interface JestTransformOptions {
   instrument?: boolean;
@@ -379,6 +339,14 @@ export function createTransformer(
       const collectCoverage = Boolean(options?.instrument);
       const isDep = isEsmDependency(sourcePath, transformerOptions.processEsmModules);
       const opts: TransformOptions = {
+        // jest remaps stack-frame NAMES through the sourcemap `names` array.
+        // tsc's transpileModule (the ts-jest baseline) emits maps with no
+        // names, so frames keep their runtime labels; oxc's names would relabel
+        // them (e.g. `Object.<anonymous>` → `Object.getStackAndItsDigest`) and
+        // break code that fingerprints stacks. The binding drops them while
+        // building the map (positions untouched) — no per-file JS rewrite.
+        // Before the spreads so an explicit `transform.sourceMapNames` wins.
+        sourceMapNames: false,
         ...derived,
         ...transformerOptions.transform,
         // Effective helper name (override, else absolute path for CJS — see
@@ -406,7 +374,7 @@ export function createTransformer(
       }
       return {
         code: out.code,
-        map: out.map ? stripSourceMapNames(JSON.parse(out.map)) : undefined,
+        map: out.map ? JSON.parse(out.map) : undefined,
       };
     },
   };
