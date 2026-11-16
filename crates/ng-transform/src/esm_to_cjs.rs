@@ -20,15 +20,9 @@
 
 use std::collections::HashMap;
 
-use oxc_allocator::Allocator;
-use oxc_ast::AstBuilder;
-use oxc_ast::NONE;
-use oxc_ast::ast::{
-    Argument, AssignmentOperator, AssignmentTarget, AssignmentTargetMaybeDefault,
-    AssignmentTargetProperty, BindingPattern, Expression, FormalParameterKind,
-    ImportDeclarationSpecifier, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget,
-    Statement, UpdateOperator, VariableDeclarationKind,
-};
+use oxc_allocator::{Allocator, ArenaBox, ArenaVec, GetAllocator};
+use oxc_ast::ast::*;
+use oxc_ast::builder::AstBuilder;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SPAN};
 use oxc_syntax::symbol::SymbolId;
@@ -135,7 +129,7 @@ pub struct CjsResult {
 }
 
 pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> CjsResult {
-    let ast = AstBuilder::new(allocator);
+    let ast = &AstBuilder::new(allocator);
 
     // A module is "already CommonJS" when it has no ESM import/export syntax. Such
     // a file is not run through interop marking (see `CjsResult::converted`); we
@@ -144,7 +138,9 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
         matches!(
             s,
             Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
                 | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
                 | Statement::ExportDefaultDeclaration(_)
                 | Statement::ExportAllDeclaration(_)
         )
@@ -178,7 +174,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
         let Some(specifiers) = &import.specifiers else {
             continue; // side-effect only
         };
-        let source = import.source.value.as_str().to_string();
+        let source = module_source(&import.source).into_owned();
         if !agg.contains_key(&source) {
             order.push(source.clone());
         }
@@ -227,7 +223,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
-        let ns_var = module_vars[import.source.value.as_str()].clone();
+        let ns_var = module_vars[module_source(&import.source).as_ref()].clone();
         for spec in specifiers {
             match spec {
                 ImportDeclarationSpecifier::ImportSpecifier(s) => {
@@ -290,7 +286,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
     }
 
     // 3. Rewrite statements: imports → require, exports → exports.x.
-    let old_body = std::mem::replace(&mut program.body, ast.vec());
+    let old_body = std::mem::replace(&mut program.body, ArenaVec::new_in(ast));
     let mut exported_names: Vec<String> = Vec::new(); // for the `void 0` header
     let mut body: Vec<Statement<'a>> = Vec::new();
     // Top-level function declarations hoist, and tsc hoists their export
@@ -304,8 +300,8 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
         use oxc_ast::ast::{Declaration as D, ExportDefaultDeclarationKind as DK};
         let fn_id = match stmt {
             Statement::FunctionDeclaration(f) => f.id.as_ref(),
-            Statement::ExportNamedDeclaration(e) => match &e.declaration {
-                Some(D::FunctionDeclaration(f)) => f.id.as_ref(),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                D::FunctionDeclaration(f) => f.id.as_ref(),
                 _ => None,
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
@@ -339,11 +335,21 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
                     &mut body,
                 );
             }
-            Statement::ExportNamedDeclaration(export) => {
-                rewrite_export_named(
+            Statement::ExportFromDeclaration(export) => {
+                rewrite_export_from(&export, &mut reexport_vars, &mut used_names, ast, &mut body);
+            }
+            Statement::ExportDeclaration(export) => {
+                rewrite_export_decl(
                     export.unbox(),
-                    &mut reexport_vars,
-                    &mut used_names,
+                    &mut exported_names,
+                    &mut hoisted_exports,
+                    ast,
+                    &mut body,
+                );
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                rewrite_export_specifiers(
+                    &export,
                     &mut exported_names,
                     &mut hoisted_exports,
                     &top_level_fns,
@@ -369,19 +375,19 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
                 let span = export.span;
                 if let Some(name) = &export.exported {
                     // export * as ns from "m"
-                    let req = require_call_at(export.source.value.as_str(), span, ast);
+                    let req = require_call_at(&module_source(&export.source), span, ast);
                     let star = call(ident("__importStar", ast), vec![req], ast);
                     needs.import_star = true;
                     body.push(assign_export_stmt(name.name().as_str(), star, ast));
                     exported_names.push(name.name().as_str().to_string());
                 } else {
-                    let req = require_call_at(export.source.value.as_str(), span, ast);
+                    let req = require_call_at(&module_source(&export.source), span, ast);
                     let call_expr = call(
                         ident("__exportStar", ast),
                         vec![req, ident("exports", ast)],
                         ast,
                     );
-                    body.push(ast.statement_expression(span, call_expr));
+                    body.push(Statement::new_expression_statement(span, call_expr, ast));
                 }
             }
             other => body.push(other),
@@ -392,7 +398,7 @@ pub fn esm_to_cjs<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Cj
     //    Interop helpers are returned as a text prelude (see below). The marker is
     //    only emitted for genuine ES modules — an already-CommonJS file keeps its
     //    own exports (and its own `exports.__esModule`, if any) intact.
-    let mut final_body = ast.vec();
+    let mut final_body = ArenaVec::new_in(ast);
     if has_esm_syntax {
         final_body.push(es_module_marker(ast));
     }
@@ -495,10 +501,10 @@ fn build_symbol_map<'a>(
 fn build_directly_exported_map<'a>(program: &Program<'a>) -> HashMap<SymbolId, String> {
     let mut map: HashMap<SymbolId, String> = HashMap::new();
     for stmt in &program.body {
-        let Statement::ExportNamedDeclaration(export) = stmt else {
+        let Statement::ExportDeclaration(export) = stmt else {
             continue;
         };
-        if let Some(oxc_ast::ast::Declaration::VariableDeclaration(v)) = &export.declaration {
+        if let oxc_ast::ast::Declaration::VariableDeclaration(v) = &export.declaration {
             let mut binders: HashMap<&str, SymbolId> = HashMap::new();
             for d in &v.declarations {
                 collect_pattern_symbols(&d.id, &mut binders);
@@ -523,8 +529,8 @@ fn build_specifier_export_map<'a>(program: &Program<'a>) -> HashMap<SymbolId, St
     for stmt in &program.body {
         let decl = match stmt {
             Statement::VariableDeclaration(v) => Some(&**v),
-            Statement::ExportNamedDeclaration(e) => match &e.declaration {
-                Some(oxc_ast::ast::Declaration::VariableDeclaration(v)) => Some(&**v),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                oxc_ast::ast::Declaration::VariableDeclaration(v) => Some(&**v),
                 _ => None,
             },
             _ => None,
@@ -543,19 +549,15 @@ fn build_specifier_export_map<'a>(program: &Program<'a>) -> HashMap<SymbolId, St
         let Statement::ExportNamedDeclaration(export) = stmt else {
             continue;
         };
-        // Directly-exported declarations are handled by `build_directly_exported_map`
-        // (routed through `exports`, not mirrored). Only the specifier form below
-        // keeps a local + mirrors writes.
-        if export.declaration.is_some() {
-            continue;
-        }
-        // `export { local as ll }` with no source — alias of a local `let`/`var`.
-        if export.source.is_none() {
-            for spec in &export.specifiers {
-                let local = spec.local.name();
-                if let Some(&sym) = module_let_var.get(local.as_str()) {
-                    map.insert(sym, spec.exported.name().as_str().to_string());
-                }
+        // Only the source-less specifier form (`export { local as ll }`) keeps a
+        // local + mirrors writes. Directly-exported declarations
+        // (`ExportDeclaration`) are handled by `build_directly_exported_map`
+        // (routed through `exports`, not mirrored), and re-exports
+        // (`ExportFromDeclaration`) bind no local.
+        for spec in &export.specifiers {
+            let local = spec.local.name();
+            if let Some(&sym) = module_let_var.get(local.as_str()) {
+                map.insert(sym, spec.exported.name().as_str().to_string());
             }
         }
     }
@@ -609,9 +611,10 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
     // synthesized arrow (whose scope isn't registered → would panic).
     fn exit_expression(&mut self, expr: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
         if let Expression::ImportExpression(imp) = expr {
-            let ast = ctx.ast;
+            let ast = &ctx.ast;
             let span = imp.span;
-            let source = std::mem::replace(&mut imp.source, ast.expression_null_literal(span));
+            let source =
+                std::mem::replace(&mut imp.source, Expression::new_null_literal(span, ast));
             *expr = dynamic_require(source, span, ast);
             self.import_star_used = true;
             return;
@@ -634,8 +637,8 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
                     return;
                 };
                 let name = name.to_string();
-                let inner = std::mem::replace(expr, ctx.ast.expression_null_literal(SPAN));
-                *expr = export_write_wrap(&name, inner, ctx.ast);
+                let inner = std::mem::replace(expr, Expression::new_null_literal(SPAN, &ctx.ast));
+                *expr = export_write_wrap(&name, inner, &ctx.ast);
             }
             // `x++` / `++x` / `x--` / `--x` → preserve value semantics:
             //   `++x` (prefix)  → `exports.x = ++x`
@@ -652,8 +655,8 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
                 let was_prefix = update.prefix;
                 let op = update.operator;
                 update.prefix = true;
-                let inner = std::mem::replace(expr, ctx.ast.expression_null_literal(SPAN));
-                *expr = export_update_wrap(&name, inner, was_prefix, op, ctx.ast);
+                let inner = std::mem::replace(expr, Expression::new_null_literal(SPAN, &ctx.ast));
+                *expr = export_update_wrap(&name, inner, was_prefix, op, &ctx.ast);
             }
             _ => {}
         }
@@ -674,7 +677,7 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = target
             && let Some(repl) = self.reference_replacement(id.reference_id.get(), ctx)
         {
-            *target = member_target(&repl.ns_var, &repl.member, id.span, ctx.ast);
+            *target = member_target(&repl.ns_var, &repl.member, id.span, &ctx.ast);
         }
     }
 
@@ -693,27 +696,32 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
         let Some(repl) = self.reference_replacement(ident.binding.reference_id.get(), ctx) else {
             return;
         };
-        let ast = ctx.ast;
+        let ast = &ctx.ast;
         let span = ident.binding.span;
-        let key = PropertyKey::StaticIdentifier(
-            ast.alloc_identifier_name(span, ast.allocator.alloc_str(ident.binding.name.as_str())),
-        );
-        let member: AssignmentTarget = ast
-            .member_expression_static(
-                span,
-                ast.expression_identifier(span, ast.allocator.alloc_str(&repl.ns_var)),
-                ast.identifier_name(span, ast.allocator.alloc_str(&repl.member)),
-                false,
-            )
-            .into();
+        let key = PropertyKey::StaticIdentifier(IdentifierName::boxed(
+            span,
+            ast.allocator().alloc_str(ident.binding.name.as_str()),
+            ast,
+        ));
+        let member: AssignmentTarget = MemberExpression::new_static_member_expression(
+            span,
+            Expression::new_identifier(span, ast.allocator().alloc_str(&repl.ns_var), ast),
+            IdentifierName::new(span, ast.allocator().alloc_str(&repl.member), ast),
+            false,
+            ast,
+        )
+        .into();
         let binding = match ident.init.take() {
-            Some(init) => AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(
-                ast.alloc(ast.assignment_target_with_default(span, member, init)),
-            ),
+            Some(init) => {
+                AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(ArenaBox::new_in(
+                    AssignmentTargetWithDefault::new(span, member, init, ast),
+                    ast,
+                ))
+            }
             None => AssignmentTargetMaybeDefault::from(member),
         };
-        *prop = AssignmentTargetProperty::AssignmentTargetPropertyProperty(
-            ast.alloc(ast.assignment_target_property_property(span, key, binding, false)),
+        *prop = AssignmentTargetProperty::new_assignment_target_property_property(
+            span, key, binding, false, ast,
         );
     }
 
@@ -722,7 +730,7 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
         if let Expression::CallExpression(call_expr) = expr
             && let Some(repl) = self.callee_replacement(&call_expr.callee, ctx)
         {
-            let ast = ctx.ast;
+            let ast = &ctx.ast;
             let span = call_expr.callee.span();
             let member = member_at(&repl.ns_var, &repl.member, span, ast);
             call_expr.callee = sequence_zero(member, ast);
@@ -734,7 +742,7 @@ impl<'a> Traverse<'a, ()> for RefRewriter {
         let Some(repl) = self.reference_replacement(id.reference_id.get(), ctx) else {
             return;
         };
-        *expr = member_at(&repl.ns_var, &repl.member, id.span, ctx.ast);
+        *expr = member_at(&repl.ns_var, &repl.member, id.span, &ctx.ast);
     }
 }
 
@@ -790,10 +798,11 @@ fn rewrite_import<'a>(
     import_kind: &HashMap<String, ImportKind>,
     needs: &mut HelperNeeds,
     emitted: &mut std::collections::HashSet<String>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
 ) {
-    let source = import.source.value.as_str();
+    let source = module_source(&import.source);
+    let source = source.as_ref();
     let span = import.span;
     if import.specifiers.is_none() && !module_vars.contains_key(source) {
         // Side-effect import of a source no other statement binds → bare
@@ -806,7 +815,11 @@ fn rewrite_import<'a>(
         // evaluation (mock-registration) order, matching tsc's per-statement
         // requires.
         if emitted.insert(source.to_string()) {
-            out.push(ast.statement_expression(span, require_call_at(source, span, ast)));
+            out.push(Statement::new_expression_statement(
+                span,
+                require_call_at(source, span, ast),
+                ast,
+            ));
         }
         return;
     }
@@ -837,21 +850,28 @@ fn rewrite_import<'a>(
     out.push(const_decl_at(&ns_var, init, span, ast));
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rewrite_export_named<'a>(
-    export: oxc_ast::ast::ExportNamedDeclaration<'a>,
+/// A module specifier's value as UTF-8. A specifier containing a lone surrogate
+/// (representable in a JS string, not in Rust's `str`) can't name a resolvable
+/// module anyway, so it falls back to `JSStr::display`'s `\uXXXX` escape form
+/// rather than failing the whole transform.
+fn module_source<'a>(lit: &oxc_ast::ast::StringLiteral<'a>) -> std::borrow::Cow<'a, str> {
+    match lit.value.as_str() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(lit.value.display().to_string()),
+    }
+}
+
+/// `export { a, b as c } from "./m"` — re-export.
+fn rewrite_export_from<'a>(
+    export: &oxc_ast::ast::ExportFromDeclaration<'a>,
     reexport_vars: &mut HashMap<String, String>,
     used_names: &mut HashMap<String, u32>,
-    exported_names: &mut Vec<String>,
-    hoisted: &mut Vec<Statement<'a>>,
-    top_level_fns: &std::collections::HashSet<String>,
-    replacements: &HashMap<String, Replacement>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
 ) {
-    // `export { a, b as c } from "./m"` — re-export.
-    if let Some(source) = &export.source {
-        let src = source.value.as_str();
+    {
+        let src = module_source(&export.source);
+        let src = src.as_ref();
         // tsc parity: re-export getters read the RAW module namespace — never a
         // shared `__importDefault`/`__importStar`-wrapped import variable. The
         // wrapper is a snapshot whose named properties don't exist when the
@@ -884,13 +904,21 @@ fn rewrite_export_named<'a>(
                 ast,
             ));
         }
-        return;
     }
+}
 
-    // `export <decl>` — keep the declaration, then assign each binding. A
-    // function declaration hoists, so its assignment hoists too (tsc parity);
-    // classes/vars assign in place and get the `void 0` header.
-    if let Some(decl) = export.declaration {
+/// `export <decl>` — keep the declaration, then assign each binding. A
+/// function declaration hoists, so its assignment hoists too (tsc parity);
+/// classes/vars assign in place and get the `void 0` header.
+fn rewrite_export_decl<'a>(
+    export: oxc_ast::ast::ExportDeclaration<'a>,
+    exported_names: &mut Vec<String>,
+    hoisted: &mut Vec<Statement<'a>>,
+    ast: &AstBuilder<'a>,
+    out: &mut Vec<Statement<'a>>,
+) {
+    {
+        let decl = export.declaration;
         let is_fn = matches!(decl, oxc_ast::ast::Declaration::FunctionDeclaration(_));
         let names = declaration_binding_names(&decl);
         out.push(Statement::from(decl));
@@ -902,13 +930,22 @@ fn rewrite_export_named<'a>(
                 exported_names.push(name);
             }
         }
-        return;
     }
+}
 
-    // `export { x, y as z }` — assign from locals. If a local is actually an
-    // imported binding (e.g. `import { X } from './m'; export { X };`), the
-    // import was rewritten to `_m.X`, so re-export through the namespace rather
-    // than a now-undefined bare identifier.
+/// `export { x, y as z }` — assign from locals. If a local is actually an
+/// imported binding (e.g. `import { X } from './m'; export { X };`), the
+/// import was rewritten to `_m.X`, so re-export through the namespace rather
+/// than a now-undefined bare identifier.
+fn rewrite_export_specifiers<'a>(
+    export: &oxc_ast::ast::ExportNamedDeclaration<'a>,
+    exported_names: &mut Vec<String>,
+    hoisted: &mut Vec<Statement<'a>>,
+    top_level_fns: &std::collections::HashSet<String>,
+    replacements: &HashMap<String, Replacement>,
+    ast: &AstBuilder<'a>,
+    out: &mut Vec<Statement<'a>>,
+) {
     for spec in &export.specifiers {
         let local = spec.local.name();
         let exported = spec.exported.name();
@@ -948,7 +985,7 @@ fn rewrite_export_default<'a>(
     exported_names: &mut Vec<String>,
     hoisted: &mut Vec<Statement<'a>>,
     used_names: &mut HashMap<String, u32>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
     out: &mut Vec<Statement<'a>>,
 ) {
     use oxc_ast::ast::ExportDefaultDeclarationKind as K;
@@ -985,14 +1022,14 @@ fn rewrite_export_default<'a>(
 fn ensure_default_name<'a>(
     id: &mut Option<oxc_ast::ast::BindingIdentifier<'a>>,
     used_names: &mut HashMap<String, u32>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> String {
     if let Some(existing) = id {
         return existing.name.as_str().to_string();
     }
     let name = unique_module_var("default", used_names);
-    let arena = ast.allocator.alloc_str(&name);
-    *id = Some(ast.binding_identifier(SPAN, arena));
+    let arena = ast.allocator().alloc_str(&name);
+    *id = Some(BindingIdentifier::new(SPAN, arena, ast));
     name
 }
 
@@ -1048,11 +1085,11 @@ fn collect_binding_idents(pattern: &BindingPattern<'_>, out: &mut Vec<String>) {
 
 // --- small builders --------------------------------------------------------
 
-fn ident<'a>(name: &str, ast: AstBuilder<'a>) -> Expression<'a> {
-    ast.expression_identifier(SPAN, ast.allocator.alloc_str(name))
+fn ident<'a>(name: &str, ast: &AstBuilder<'a>) -> Expression<'a> {
+    Expression::new_identifier(SPAN, ast.allocator().alloc_str(name), ast)
 }
 
-fn member<'a>(object: &str, property: &str, ast: AstBuilder<'a>) -> Expression<'a> {
+fn member<'a>(object: &str, property: &str, ast: &AstBuilder<'a>) -> Expression<'a> {
     member_at(object, property, SPAN, ast)
 }
 
@@ -1063,13 +1100,14 @@ fn member_at<'a>(
     object: &str,
     property: &str,
     span: oxc_span::Span,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Expression<'a> {
-    ast.member_expression_static(
+    MemberExpression::new_static_member_expression(
         span,
-        ast.expression_identifier(span, ast.allocator.alloc_str(object)),
-        ast.identifier_name(span, ast.allocator.alloc_str(property)),
+        Expression::new_identifier(span, ast.allocator().alloc_str(object), ast),
+        IdentifierName::new(span, ast.allocator().alloc_str(property), ast),
         false,
+        ast,
     )
     .into()
 }
@@ -1079,13 +1117,14 @@ fn member_target<'a>(
     object: &str,
     property: &str,
     span: oxc_span::Span,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> SimpleAssignmentTarget<'a> {
-    ast.member_expression_static(
+    MemberExpression::new_static_member_expression(
         span,
-        ast.expression_identifier(span, ast.allocator.alloc_str(object)),
-        ast.identifier_name(span, ast.allocator.alloc_str(property)),
+        Expression::new_identifier(span, ast.allocator().alloc_str(object), ast),
+        IdentifierName::new(span, ast.allocator().alloc_str(property), ast),
         false,
+        ast,
     )
     .into()
 }
@@ -1093,22 +1132,29 @@ fn member_target<'a>(
 fn call<'a>(
     callee: Expression<'a>,
     args: Vec<Expression<'a>>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Expression<'a> {
-    let mut a = ast.vec();
+    let mut a = ArenaVec::new_in(ast);
     for arg in args {
         a.push(Argument::from(arg));
     }
-    ast.expression_call(SPAN, callee, NONE, a, false)
+    Expression::new_call_expression(SPAN, callee, None, a, false, ast)
 }
 
 /// Builds `require("…")`, stamping the call with `span` so a module that throws
 /// while loading reports the original `import`/`export … from` statement as the
 /// stack frame, matching tsc.
-fn require_call_at<'a>(source: &str, span: oxc_span::Span, ast: AstBuilder<'a>) -> Expression<'a> {
-    let arg = ast.expression_string_literal(span, ast.allocator.alloc_str(source), None);
-    let callee = ast.expression_identifier(span, "require");
-    ast.expression_call(span, callee, NONE, ast.vec1(Argument::from(arg)), false)
+fn require_call_at<'a>(source: &str, span: oxc_span::Span, ast: &AstBuilder<'a>) -> Expression<'a> {
+    let arg = Expression::new_string_literal(span, ast.allocator().alloc_str(source), None, ast);
+    let callee = Expression::new_identifier(span, "require", ast);
+    Expression::new_call_expression(
+        span,
+        callee,
+        None,
+        ArenaVec::from_array_in([Argument::from(arg)], ast),
+        false,
+        ast,
+    )
 }
 
 /// Dynamic import downlevel: `import(<source>)` →
@@ -1118,50 +1164,54 @@ fn require_call_at<'a>(source: &str, span: oxc_span::Span, ast: AstBuilder<'a>) 
 fn dynamic_require<'a>(
     source: Expression<'a>,
     span: oxc_span::Span,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Expression<'a> {
     // All wrapper nodes carry the original `import()` span, so the whole
     // expression maps back to the source location rather than position 0.
     let call_at = |callee: Expression<'a>, arg: Option<Expression<'a>>| {
         let args = match arg {
-            Some(a) => ast.vec1(Argument::from(a)),
-            None => ast.vec(),
+            Some(a) => ArenaVec::from_array_in([Argument::from(a)], ast),
+            None => ArenaVec::new_in(ast),
         };
-        ast.expression_call(span, callee, NONE, args, false)
+        Expression::new_call_expression(span, callee, None, args, false, ast)
     };
     // require(<source>)
-    let require_call = call_at(ast.expression_identifier(span, "require"), Some(source));
+    let require_call = call_at(
+        Expression::new_identifier(span, "require", ast),
+        Some(source),
+    );
     // () => __importStar(require(<source>))
     let import_star = call_at(
-        ast.expression_identifier(span, "__importStar"),
+        Expression::new_identifier(span, "__importStar", ast),
         Some(require_call),
     );
     let factory = arrow_getter(import_star, ast);
     // Promise.resolve()
     let promise_resolve = call_at(member_at("Promise", "resolve", span, ast), None);
     // Promise.resolve().then(() => …)
-    let then: Expression<'a> = ast
-        .member_expression_static(
-            span,
-            promise_resolve,
-            ast.identifier_name(span, "then"),
-            false,
-        )
-        .into();
+    let then: Expression<'a> = MemberExpression::new_static_member_expression(
+        span,
+        promise_resolve,
+        IdentifierName::new(span, "then", ast),
+        false,
+        ast,
+    )
+    .into();
     call_at(then, Some(factory))
 }
 
 /// `(0, expr)` sequence — strips `this` from a method-style callee.
-fn sequence_zero<'a>(expr: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
-    let mut items = ast.vec();
-    items.push(ast.expression_numeric_literal(
+fn sequence_zero<'a>(expr: Expression<'a>, ast: &AstBuilder<'a>) -> Expression<'a> {
+    let mut items = ArenaVec::new_in(ast);
+    items.push(Expression::new_numeric_literal(
         SPAN,
         0.0,
         None,
         oxc_syntax::number::NumberBase::Decimal,
+        ast,
     ));
     items.push(expr);
-    ast.expression_sequence(SPAN, items)
+    Expression::new_sequence_expression(SPAN, items, ast)
 }
 
 /// Builds `const <name> = …;`, stamping the statement with `span` (used for
@@ -1170,55 +1220,66 @@ fn const_decl_at<'a>(
     name: &str,
     init: Expression<'a>,
     span: oxc_span::Span,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Statement<'a> {
-    let id = ast.binding_pattern_binding_identifier(span, ast.allocator.alloc_str(name));
-    let declarator = ast.variable_declarator(
+    let id = BindingPattern::new_binding_identifier(span, ast.allocator().alloc_str(name), ast);
+    let declarator = VariableDeclarator::new(span, id, None, Some(init), false, ast);
+    let mut decls = ArenaVec::new_in(ast);
+    decls.push(declarator);
+    Statement::from(Declaration::new_variable_declaration(
         span,
         VariableDeclarationKind::Const,
-        id,
-        NONE,
-        Some(init),
+        decls,
         false,
-    );
-    let mut decls = ast.vec();
-    decls.push(declarator);
-    Statement::from(ast.declaration_variable(span, VariableDeclarationKind::Const, decls, false))
+        ast,
+    ))
 }
 
 /// `exports.<name> = <value>;`
-fn assign_export_stmt<'a>(name: &str, value: Expression<'a>, ast: AstBuilder<'a>) -> Statement<'a> {
-    let target = ast.member_expression_static(
+fn assign_export_stmt<'a>(
+    name: &str,
+    value: Expression<'a>,
+    ast: &AstBuilder<'a>,
+) -> Statement<'a> {
+    let target = MemberExpression::new_static_member_expression(
         SPAN,
         ident("exports", ast),
-        ast.identifier_name(SPAN, ast.allocator.alloc_str(name)),
+        IdentifierName::new(SPAN, ast.allocator().alloc_str(name), ast),
         false,
+        ast,
     );
-    let assign = ast.expression_assignment(
+    let assign = Expression::new_assignment_expression(
         SPAN,
         oxc_ast::ast::AssignmentOperator::Assign,
         AssignmentTarget::from(target),
         value,
+        ast,
     );
-    ast.statement_expression(SPAN, assign)
+    Statement::new_expression_statement(SPAN, assign, ast)
 }
 
 /// Wrap a write to a live exported binding: `<inner>` → `exports.<name> = (<inner>)`.
 /// `<inner>` is the original (already-traversed) assignment expression, so its LHS
 /// still updates the module-local `let`/`var` (the read source-of-truth) while the
 /// result is mirrored into `exports.<name>`.
-fn export_write_wrap<'a>(name: &str, inner: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
-    let target = ast.member_expression_static(
+fn export_write_wrap<'a>(
+    name: &str,
+    inner: Expression<'a>,
+    ast: &AstBuilder<'a>,
+) -> Expression<'a> {
+    let target = MemberExpression::new_static_member_expression(
         SPAN,
         ident("exports", ast),
-        ast.identifier_name(SPAN, ast.allocator.alloc_str(name)),
+        IdentifierName::new(SPAN, ast.allocator().alloc_str(name), ast),
         false,
+        ast,
     );
-    ast.expression_assignment(
+    Expression::new_assignment_expression(
         SPAN,
         AssignmentOperator::Assign,
         AssignmentTarget::from(target),
         inner,
+        ast,
     )
 }
 
@@ -1233,7 +1294,7 @@ fn export_update_wrap<'a>(
     inner: Expression<'a>,
     was_prefix: bool,
     op: UpdateOperator,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Expression<'a> {
     let wrapped = export_write_wrap(name, inner, ast);
     if was_prefix {
@@ -1244,23 +1305,37 @@ fn export_update_wrap<'a>(
         UpdateOperator::Increment => (oxc_ast::ast::BinaryOperator::Subtraction, 1.0),
         UpdateOperator::Decrement => (oxc_ast::ast::BinaryOperator::Addition, 1.0),
     };
-    let one =
-        ast.expression_numeric_literal(SPAN, 1.0, None, oxc_syntax::number::NumberBase::Decimal);
-    ast.expression_binary(SPAN, wrapped, compensate_op, one)
+    let one = Expression::new_numeric_literal(
+        SPAN,
+        1.0,
+        None,
+        oxc_syntax::number::NumberBase::Decimal,
+        ast,
+    );
+    Expression::new_binary_expression(SPAN, wrapped, compensate_op, one, ast)
 }
 
 /// `() => <value>` arrow (used as a re-export getter body).
-fn arrow_getter<'a>(value: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
-    let params = ast.formal_parameters(
+fn arrow_getter<'a>(value: Expression<'a>, ast: &AstBuilder<'a>) -> Expression<'a> {
+    let params = FormalParameters::boxed(
         SPAN,
         FormalParameterKind::ArrowFormalParameters,
-        ast.vec(),
-        NONE,
+        ArenaVec::new_in(ast),
+        None,
+        ast,
     );
-    let mut stmts = ast.vec();
-    stmts.push(ast.statement_expression(SPAN, value));
-    let body = ast.function_body(SPAN, ast.vec(), stmts);
-    ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, body)
+    // Expression-bodied (`() => value`): oxc 0.157's `ArrowFunctionBody` holds
+    // the expression directly (it replaced the old `expression: true` flag +
+    // single-`ExpressionStatement` `FunctionBody` encoding).
+    Expression::new_arrow_function_expression(
+        SPAN,
+        false, // async
+        None,
+        params,
+        None,
+        ArrowFunctionBody::from(value),
+        ast,
+    )
 }
 
 /// `Object.defineProperty(exports, "<name>", { enumerable: true, configurable: true, get: () => <value> });`
@@ -1275,85 +1350,98 @@ fn arrow_getter<'a>(value: Expression<'a>, ast: AstBuilder<'a>) -> Expression<'a
 fn define_export_getter<'a>(
     name: &str,
     value: Expression<'a>,
-    ast: AstBuilder<'a>,
+    ast: &AstBuilder<'a>,
 ) -> Statement<'a> {
-    let mut props = ast.vec();
-    props.push(ast.object_property_kind_object_property(
+    let mut props = ArenaVec::new_in(ast);
+    props.push(ObjectPropertyKind::new_object_property(
         SPAN,
         PropertyKind::Init,
-        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "enumerable")),
-        ast.expression_boolean_literal(SPAN, true),
+        PropertyKey::StaticIdentifier(IdentifierName::boxed(SPAN, "enumerable", ast)),
+        Expression::new_boolean_literal(SPAN, true, ast),
         false,
         false,
         false,
+        ast,
     ));
-    props.push(ast.object_property_kind_object_property(
+    props.push(ObjectPropertyKind::new_object_property(
         SPAN,
         PropertyKind::Init,
-        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "configurable")),
-        ast.expression_boolean_literal(SPAN, true),
+        PropertyKey::StaticIdentifier(IdentifierName::boxed(SPAN, "configurable", ast)),
+        Expression::new_boolean_literal(SPAN, true, ast),
         false,
         false,
         false,
+        ast,
     ));
-    props.push(ast.object_property_kind_object_property(
+    props.push(ObjectPropertyKind::new_object_property(
         SPAN,
         PropertyKind::Init,
-        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "get")),
+        PropertyKey::StaticIdentifier(IdentifierName::boxed(SPAN, "get", ast)),
         arrow_getter(value, ast),
         false,
         false,
         false,
+        ast,
     ));
-    let opts = ast.expression_object(SPAN, props);
-    let name_lit = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(name), None);
+    let opts = Expression::new_object_expression(SPAN, props, ast);
+    let name_lit = Expression::new_string_literal(SPAN, ast.allocator().alloc_str(name), None, ast);
     let define = member("Object", "defineProperty", ast);
     let call_expr = call(define, vec![ident("exports", ast), name_lit, opts], ast);
-    ast.statement_expression(SPAN, call_expr)
+    Statement::new_expression_statement(SPAN, call_expr, ast)
 }
 
 /// `Object.defineProperty(exports, "__esModule", { value: true });`
-fn es_module_marker<'a>(ast: AstBuilder<'a>) -> Statement<'a> {
+fn es_module_marker<'a>(ast: &AstBuilder<'a>) -> Statement<'a> {
     let define = member("Object", "defineProperty", ast);
     let props = {
-        let mut v = ast.vec();
-        v.push(ast.object_property_kind_object_property(
+        let mut v = ArenaVec::new_in(ast);
+        v.push(ObjectPropertyKind::new_object_property(
             SPAN,
             oxc_ast::ast::PropertyKind::Init,
-            oxc_ast::ast::PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, "value")),
-            ast.expression_boolean_literal(SPAN, true),
+            oxc_ast::ast::PropertyKey::StaticIdentifier(IdentifierName::boxed(SPAN, "value", ast)),
+            Expression::new_boolean_literal(SPAN, true, ast),
             false,
             false,
             false,
+            ast,
         ));
-        ast.expression_object(SPAN, v)
+        Expression::new_object_expression(SPAN, v, ast)
     };
-    let marker = ast.expression_string_literal(SPAN, "__esModule", None);
+    let marker = Expression::new_string_literal(SPAN, "__esModule", None, ast);
     let call_expr = call(define, vec![ident("exports", ast), marker, props], ast);
-    ast.statement_expression(SPAN, call_expr)
+    Statement::new_expression_statement(SPAN, call_expr, ast)
 }
 
 /// `exports.a = exports.b = void 0;` (chained), matching TS's hoist.
-fn void0_hoist<'a>(names: &[String], ast: AstBuilder<'a>) -> Statement<'a> {
+fn void0_hoist<'a>(names: &[String], ast: &AstBuilder<'a>) -> Statement<'a> {
     // Build right-to-left: void 0, then wrap each `exports.name = …`.
-    let mut value = ast.expression_unary(
+    let mut value = Expression::new_unary_expression(
         SPAN,
         oxc_ast::ast::UnaryOperator::Void,
-        ast.expression_numeric_literal(SPAN, 0.0, None, oxc_syntax::number::NumberBase::Decimal),
+        Expression::new_numeric_literal(
+            SPAN,
+            0.0,
+            None,
+            oxc_syntax::number::NumberBase::Decimal,
+            ast,
+        ),
+        ast,
     );
     for name in names {
-        let target = ast.member_expression_static(
+        let target = MemberExpression::new_static_member_expression(
             SPAN,
             ident("exports", ast),
-            ast.identifier_name(SPAN, ast.allocator.alloc_str(name)),
+            IdentifierName::new(SPAN, ast.allocator().alloc_str(name), ast),
             false,
+            ast,
         );
-        value = ast.expression_assignment(
+        value = Expression::new_assignment_expression(
             SPAN,
             oxc_ast::ast::AssignmentOperator::Assign,
             AssignmentTarget::from(target),
             value,
+            ast,
         );
     }
-    ast.statement_expression(SPAN, value)
+    Statement::new_expression_statement(SPAN, value, ast)
 }

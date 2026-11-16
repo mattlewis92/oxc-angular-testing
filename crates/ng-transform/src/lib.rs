@@ -4,7 +4,8 @@
 //! code under test — component resource inlining, Angular decorator
 //! downleveling, and the JIT signal-initializer-API decorators — as oxc AST
 //! passes, with optional istanbul-compatible coverage instrumentation folded
-//! into the *same* parse/codegen via the vendored [`oxc_coverage_instrument`].
+//! into the *same* parse/codegen via [`oxc_coverage_instrument`]'s AST-level
+//! `instrument_program` entry (its `ast-api` feature).
 //!
 //! Pipeline: parse → semantic → \[coverage instrument\] → Angular passes →
 //! (oxc TS/decorator lowering) → ESM→CJS → codegen. One
@@ -32,7 +33,7 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};
-use oxc_coverage_instrument::{InstrumentOptions, instrument_program_ast};
+use oxc_coverage_instrument::{InstrumentOptions, instrument_program};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
@@ -83,7 +84,11 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(filename).unwrap_or_default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    let mut errors: Vec<String> = parsed.errors.iter().map(ToString::to_string).collect();
+    let mut errors: Vec<String> = parsed
+        .diagnostics
+        .errors()
+        .map(ToString::to_string)
+        .collect();
     let mut program = parsed.program;
     // Set when the ESM→CJS pass runs; `cjs_prelude` holds the interop helpers to
     // emit after `"use strict";`.
@@ -105,10 +110,27 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             source_map: options.source_map,
             ..InstrumentOptions::default()
         };
-        match instrument_program_ast(&allocator, &mut program, source, filename, &cov_opts) {
+        let scoping = SemanticBuilder::new()
+            .build(&program)
+            .semantic
+            .into_scoping();
+        // Unhandled pragmas (`result.unhandled_pragmas`) are dropped: the host has
+        // no warnings channel. Scoping is rebuilt by every pass below, so the
+        // returned (pre-preamble) `result.scoping` isn't needed either.
+        match instrument_program(
+            &allocator,
+            &mut program,
+            scoping,
+            source,
+            filename,
+            &cov_opts,
+        ) {
             Ok(result) => {
+                coverage_preamble = result
+                    .preamble
+                    .map(|p| with_coverage_schema(&p))
+                    .unwrap_or_default();
                 coverage_map = Some(result.coverage_map_json);
-                coverage_preamble = result.preamble;
             }
             Err(err) => errors.push(err.to_string()),
         }
@@ -153,7 +175,10 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
 
     // tsconfig `strictNullChecks: false` metadata parity: strip `null`/
     // `undefined` from union type annotations before the serializer sees them
-    // (see `strict_null_strip`). Type-only — needs no scoping.
+    // (see `strict_null_strip`). Type-only — needs no scoping. oxc 0.157's own
+    // `DecoratorOptions::strict_null_checks` (also passed below) is NOT a
+    // substitute: it still serializes a `Date | null` ctor param as `Object`
+    // (pinned by the napi `strictNullChecks=false` test).
     if options.lower && options.emit_decorator_metadata && !options.strict_null_checks {
         use oxc_ast_visit::VisitMut;
         strict_null_strip::StripNullableUnions.visit_program(&mut program);
@@ -163,7 +188,10 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
     // literals (tsc parity — see `enum_ref_fold`), so oxc's enum lowering emits
     // the string-enum form instead of a bogus reverse mapping.
     if options.lower {
-        enum_ref_fold::fold_same_file_enum_refs(&mut program, oxc_ast::AstBuilder::new(&allocator));
+        enum_ref_fold::fold_same_file_enum_refs(
+            &mut program,
+            &oxc_ast::builder::AstBuilder::new(&allocator),
+        );
     }
 
     // TypeScript → JavaScript + legacy-decorator lowering, so the output is
@@ -239,6 +267,7 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             decorator: DecoratorOptions {
                 legacy: options.experimental_decorators,
                 emit_decorator_metadata: options.emit_decorator_metadata,
+                strict_null_checks: options.strict_null_checks,
             },
             helper_loader: HelperLoaderOptions {
                 module_name: options
@@ -250,12 +279,12 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
             env,
             // Runtime mode imports decorator/class helpers from `@oxc-project/runtime`
             // (a dependency of `@oxc-angular-testing/transform`). Inline mode is not
-            // yet implemented in oxc 0.126.
+            // yet implemented in oxc 0.157.
             ..OxcTransformOptions::default()
         };
         let ret = Transformer::new(&allocator, Path::new(filename), &oxc_options)
             .build_with_scoping(scoping, &mut program);
-        errors.extend(ret.errors.iter().map(ToString::to_string));
+        errors.extend(ret.diagnostics.errors().map(ToString::to_string));
 
         // oxc synthesizes a derived class's field-init constructor as
         // `constructor(..._args) { super(..._args); /*fields*/ }`. Angular JIT's
@@ -303,6 +332,33 @@ pub fn transform(source: &str, filename: &str, options: &TransformOptions) -> Tr
         coverage_map,
         errors,
     }
+}
+
+/// istanbul's `_coverageSchema` magic value (`istanbul-lib-coverage`'s schema hash).
+const COVERAGE_SCHEMA_MAGIC: &str = "1a1c01bbd47fc00a2c39e90264f33305004495a9";
+const COVERAGE_DATA_ANCHOR: &str = "var coverageData = {";
+
+/// Splice istanbul's `_coverageSchema` marker into the head of the preamble's
+/// `coverageData` object literal, as a **bare-identifier** key.
+///
+/// `istanbul-lib-instrument`'s `readInitialCoverage` — which jest's
+/// `generateEmptyCoverage` uses to report never-imported `collectCoverageFrom`
+/// files as 0% — locates the coverage object by an `ObjectProperty` whose key is
+/// the *identifier* `_coverageSchema` with this exact value. Upstream's preamble
+/// embeds the `FileCoverage` JSON without it, so those files would be dropped
+/// from the report. The result is a mixed quoted/unquoted-key literal: valid JS,
+/// never re-parsed as JSON. Not upstream as of `oxc_coverage_instrument` 0.20.0.
+fn with_coverage_schema(preamble: &str) -> String {
+    debug_assert!(
+        preamble.contains(COVERAGE_DATA_ANCHOR),
+        "upstream preamble shape changed: `{COVERAGE_DATA_ANCHOR}` not found, so the \
+         `_coverageSchema` marker would be silently dropped"
+    );
+    preamble.replacen(
+        COVERAGE_DATA_ANCHOR,
+        &format!("{COVERAGE_DATA_ANCHOR}_coverageSchema:\"{COVERAGE_SCHEMA_MAGIC}\","),
+        1,
+    )
 }
 
 /// Prepend, in order: `"use strict";` + the CJS interop prelude (CJS only), then

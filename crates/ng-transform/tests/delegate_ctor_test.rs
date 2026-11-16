@@ -59,7 +59,7 @@ export class Child extends Base { x = 1; }
 #[test]
 fn oxc_synthesizes_the_expected_delegate_ctor_shape() {
     // Pre-rewrite CANARY against oxc itself. DelegateCtorTransform's matcher is keyed
-    // to the exact shape oxc 0.126 synthesizes for a derived class's field-init
+    // to the exact shape oxc 0.157 synthesizes for a derived class's field-init
     // constructor: `constructor(...<ident>) { super(...<ident>); … }`. Run oxc's
     // transformer ALONE — the same env our pipeline uses (es2016 + set_public_class_fields)
     // and WITHOUT our delegate-ctor pass — and assert that shape. An oxc upgrade that

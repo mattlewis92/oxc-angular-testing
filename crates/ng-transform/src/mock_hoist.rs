@@ -29,7 +29,6 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Vec as ArenaVec;
-use oxc_ast::AstBuilder;
 use oxc_ast::ast::{
     Argument, BindingPattern, Expression, ImportDeclarationSpecifier, Program, PropertyKey,
     Statement, VariableDeclarator,
@@ -115,9 +114,7 @@ impl<'a> Traverse<'a, ()> for MockHoist {
         for stmt in &node.body {
             match stmt {
                 // import { jest } from '@jest/globals'  (incl. `jest as alias`)
-                Statement::ImportDeclaration(import)
-                    if import.source.value.as_str() == module_source =>
-                {
+                Statement::ImportDeclaration(import) if import.source.value == module_source => {
                     let Some(specifiers) = &import.specifiers else {
                         continue;
                     };
@@ -155,13 +152,12 @@ impl<'a> Traverse<'a, ()> for MockHoist {
         if !stmts.iter().any(|s| is_hoistable(s, &self.locals, methods)) {
             return;
         }
-        let ast: AstBuilder<'a> = ctx.ast;
         let module_source = self.framework.module_source();
         let object_name = self.framework.object_name();
-        let old = std::mem::replace(stmts, ast.vec());
-        let mut providers = ast.vec();
-        let mut hoisted = ast.vec();
-        let mut rest = ast.vec();
+        let old = std::mem::replace(stmts, ArenaVec::new_in(ctx));
+        let mut providers = ArenaVec::new_in(ctx);
+        let mut hoisted = ArenaVec::new_in(ctx);
+        let mut rest = ArenaVec::new_in(ctx);
         for s in old {
             if is_hoistable(&s, &self.locals, methods) {
                 hoisted.push(s);
@@ -194,7 +190,7 @@ impl<'a> Traverse<'a, ()> for MockHoist {
 /// of the runner's module, or a `const { <obj> } = require('<module>')`?
 fn declares_runner_object(stmt: &Statement<'_>, module_source: &str, object_name: &str) -> bool {
     match stmt {
-        Statement::ImportDeclaration(import) => import.source.value.as_str() == module_source,
+        Statement::ImportDeclaration(import) => import.source.value == module_source,
         Statement::VariableDeclaration(decl) => decl
             .declarations
             .iter()
@@ -223,7 +219,7 @@ fn object_destructured_from_require(
     let Some(Argument::StringLiteral(arg)) = call.arguments.first() else {
         return None;
     };
-    if arg.value.as_str() != module_source {
+    if arg.value != module_source {
         return None;
     }
     // id must be an object pattern with an `<object_name>` property.

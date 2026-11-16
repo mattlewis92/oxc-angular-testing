@@ -59,7 +59,7 @@ impl Default for DelegateCtorTransform {
 impl<'a> Traverse<'a, ()> for DelegateCtorTransform {
     fn enter_class(&mut self, class: &mut Class<'a>, ctx: &mut TraverseCtx<'a, ()>) {
         // Only derived classes synthesize a delegating constructor.
-        if class.super_class.is_none() {
+        if class.heritage.is_none() {
             return;
         }
         for element in &mut class.body.body {
@@ -114,15 +114,14 @@ impl<'a> Traverse<'a, ()> for DelegateCtorTransform {
             // Rewrite: drop the rest param, and change the super call to
             // `super(...arguments)`.
             func.params.rest = None;
-            if let Some(body) = func.body.as_deref_mut() {
-                if let Some(Statement::ExpressionStatement(stmt)) = body.statements.first_mut() {
-                    if let Expression::CallExpression(call) = &mut stmt.expression {
-                        let args_ident = ctx.ast.expression_identifier(SPAN, "arguments");
-                        call.arguments.clear();
-                        call.arguments
-                            .push(ctx.ast.argument_spread_element(SPAN, args_ident));
-                    }
-                }
+            if let Some(body) = func.body.as_deref_mut()
+                && let Some(Statement::ExpressionStatement(stmt)) = body.statements.first_mut()
+                && let Expression::CallExpression(call) = &mut stmt.expression
+            {
+                let args_ident = Expression::new_identifier(SPAN, "arguments", ctx);
+                call.arguments.clear();
+                call.arguments
+                    .push(Argument::new_spread_element(SPAN, args_ident, ctx));
             }
         }
     }

@@ -27,10 +27,10 @@ impl<'a> VisitMut<'a> for StripNullableUnions {
             // to Object either way, and an empty union isn't a valid type.
             if keep > 0 && keep < union.types.len() {
                 union.types.retain(|t| !is_nullable(t));
-                if keep == 1 {
-                    if let Some(single) = union.types.pop() {
-                        *ty = single;
-                    }
+                if keep == 1
+                    && let Some(single) = union.types.pop()
+                {
+                    *ty = single;
                 }
             }
         }

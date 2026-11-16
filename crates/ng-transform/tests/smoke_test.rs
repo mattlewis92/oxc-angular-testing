@@ -1,6 +1,6 @@
 //! End-to-end smoke tests: the pipeline parses, codegens, and (when requested)
-//! folds istanbul coverage into the same pass via the vendored
-//! `instrument_program_ast`.
+//! folds istanbul coverage into the same pass via `oxc_coverage_instrument`'s
+//! `instrument_program`.
 
 use ng_transform::{TransformOptions, transform};
 

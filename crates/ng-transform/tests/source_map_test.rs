@@ -9,7 +9,7 @@ use oxc_sourcemap::SourceMap;
 
 struct Decoded {
     code: String,
-    map: SourceMap,
+    map: SourceMap<'static>,
 }
 
 fn cjs_with_map(src: &str) -> Decoded {
@@ -22,7 +22,9 @@ fn cjs_with_map(src: &str) -> Decoded {
     };
     let out = transform(src, "m.ts", &opts);
     assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
-    let map = SourceMap::from_json_string(&out.source_map.expect("source map")).unwrap();
+    let map = SourceMap::from_json_string(&out.source_map.expect("source map"))
+        .unwrap()
+        .into_owned();
     Decoded {
         code: out.code,
         map,
@@ -138,7 +140,8 @@ fn hoisted_jest_mock_maps_to_its_original_line() {
     };
     let out = transform(src, "m.ts", &opts);
     assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
-    let map = SourceMap::from_json_string(&out.source_map.expect("source map")).unwrap();
+    let map_json = out.source_map.expect("source map");
+    let map = SourceMap::from_json_string(&map_json).unwrap();
     // The mock moved up to the top of the body, but still maps to its original
     // line 2 (hoisting reorders statements without rewriting their spans).
     let line = gen_line(&out.code, "jest.mock");
@@ -220,7 +223,8 @@ fn coverage_preamble_does_not_shift_mapped_lines() {
     );
     assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
     assert!(out.coverage_map.is_some(), "coverage map present");
-    let map = SourceMap::from_json_string(&out.source_map.expect("source map")).unwrap();
+    let map_json = out.source_map.expect("source map");
+    let map = SourceMap::from_json_string(&map_json).unwrap();
     let line = gen_line(&out.code, "return a + 1");
     assert_eq!(
         orig_line_of(&map, line),
