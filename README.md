@@ -60,8 +60,10 @@ By default component styles are **stripped** (`styles`, `styleUrl`, `styleUrls`
 removed) — matching jest-preset-angular, and right for node/jsdom unit tests
 where layout doesn't exist anyway. Under vitest **browser mode**, real-layout
 tests need styles applied, so the plugin keeps them there: when `keepStyles` is
-not set, it is decided per Vite environment — styles are kept for the `client`
-environment (browser mode) and stripped for `ssr` (node/jsdom projects). Pass
+not set, styles are kept only for modules transformed by browser mode's Vite
+server and stripped for node, jsdom and happy-dom projects. (Vitest transforms
+jsdom/happy-dom projects through the same `client` Vite environment as browser
+mode, so the environment name alone does not tell them apart.) Pass
 `oxcAngular({ keepStyles: true | false })` to force one behavior everywhere.
 
 When styles are kept, the transform does **not** compile any CSS itself —

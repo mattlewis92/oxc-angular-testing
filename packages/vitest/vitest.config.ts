@@ -16,7 +16,22 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['test/**/*.spec.ts'],
-    environment: 'node',
+    projects: [
+      {
+        extends: true,
+        test: { name: 'node', include: ['test/**/*.spec.ts'], environment: 'node' },
+      },
+      {
+        // vitest transforms jsdom projects through the `client` Vite
+        // environment, the same one browser mode uses, so the keepStyles
+        // default must still strip here.
+        extends: true,
+        test: {
+          name: 'jsdom',
+          include: ['test/keep-styles-default.spec.ts'],
+          environment: 'jsdom',
+        },
+      },
+    ],
   },
 });
