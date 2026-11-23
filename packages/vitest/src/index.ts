@@ -6,7 +6,7 @@ import {
   deriveTransformOptions,
   type DerivedTransformOptions,
 } from '@oxc-angular-testing/transform/tsconfig';
-import type { Plugin, ResolvedConfig } from 'vite';
+import type { Environment, Plugin, ResolvedConfig } from 'vite';
 
 const require_ = createRequire(import.meta.url);
 
@@ -97,11 +97,11 @@ export interface OxcAngularOptions {
    * Keep component styles instead of stripping them. `styleUrl`/`styleUrls`
    * are rewritten to `?inline` default imports, so Vite's CSS pipeline (with
    * your sass/less/postcss config) compiles them and Angular JIT receives the
-   * CSS text in `styles: [...]`. When omitted, this is decided per Vite
-   * environment: styles are kept for the `client` environment (vitest browser
-   * mode, where real-layout tests need them) and stripped everywhere else
-   * (`ssr` — node/jsdom projects, matching jest-preset-angular). Pass a
-   * boolean to force one behavior for all environments.
+   * CSS text in `styles: [...]`. When omitted, styles are kept only when the
+   * module is transformed by vitest browser mode's Vite server (where
+   * real-layout tests need them) and stripped everywhere else — node, jsdom
+   * and happy-dom projects, matching jest-preset-angular. Pass a boolean to
+   * force one behavior for all environments.
    */
   keepStyles?: boolean;
   /**
@@ -137,6 +137,29 @@ export interface OxcAngularOptions {
 // read without taking a hard dependency on vitest's types.
 interface VitestAwareConfig {
   test?: { coverage?: { enabled?: boolean; provider?: string } };
+}
+
+const VITEST_BROWSER_PLUGIN_PREFIX = 'vitest:browser';
+const browserModeServers = new WeakMap<ResolvedConfig, boolean>();
+
+/**
+ * Whether `environment` belongs to the dedicated Vite server vitest browser
+ * mode creates. That server always registers `vitest:browser*` plugins, which
+ * holds however browser mode was enabled (config, `--browser`, or a project),
+ * whereas `test.browser.enabled` in the Vite config misses the CLI flag and a
+ * plugin instance shared across projects cannot rely on closure state.
+ */
+function isBrowserModeServer(environment: Environment | undefined): boolean {
+  if (environment?.name !== 'client') return false;
+  const config = environment.getTopLevelConfig();
+  let isBrowser = browserModeServers.get(config);
+  if (isBrowser === undefined) {
+    isBrowser = config.plugins.some((plugin) =>
+      plugin.name.startsWith(VITEST_BROWSER_PLUGIN_PREFIX),
+    );
+    browserModeServers.set(config, isBrowser);
+  }
+  return isBrowser;
 }
 
 /**
@@ -200,11 +223,10 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
           // `transform` spread, and `coverage` is excluded from `transform`'s type, so
           // there is no second, inconsistent knob.
           coverage: options.coverage ?? autoCoverage,
-          // Styles: an explicit boolean wins; otherwise keep styles only in the
-          // `client` Vite environment — vitest browser mode transforms test
-          // modules through it, while node/jsdom projects use `ssr`. The
-          // fallback (no environment) strips, matching historical behavior.
-          keepStyles: options.keepStyles ?? this.environment?.name === 'client',
+          // Styles: an explicit boolean wins; otherwise keep styles only under
+          // vitest browser mode. The `client` environment name alone is not
+          // enough: vitest also runs jsdom/happy-dom projects through `client`.
+          keepStyles: options.keepStyles ?? isBrowserModeServer(this.environment),
           // Vite returns the compiled CSS as a string for `?inline` imports —
           // hard-coded here since this plugin always delegates CSS to Vite.
           keepStylesQuery: 'inline',
