@@ -98,7 +98,7 @@ export interface OxcAngularOptions {
    * are rewritten to `?inline` default imports, so Vite's CSS pipeline (with
    * your sass/less/postcss config) compiles them and Angular JIT receives the
    * CSS text in `styles: [...]`. When omitted, styles are kept only when the
-   * module is transformed by vitest browser mode's Vite server (where
+   * module is transformed for vitest browser mode (where
    * real-layout tests need them) and stripped everywhere else — node, jsdom
    * and happy-dom projects, matching jest-preset-angular. Pass a boolean to
    * force one behavior for all environments.
@@ -140,24 +140,24 @@ interface VitestAwareConfig {
 }
 
 const VITEST_BROWSER_PLUGIN_PREFIX = 'vitest:browser';
-const browserModeServers = new WeakMap<ResolvedConfig, boolean>();
+const browserModeEnvironments = new WeakMap<Environment, boolean>();
 
 /**
- * Whether `environment` belongs to the dedicated Vite server vitest browser
- * mode creates. That server always registers `vitest:browser*` plugins, which
- * holds however browser mode was enabled (config, `--browser`, or a project),
- * whereas `test.browser.enabled` in the Vite config misses the CLI flag and a
- * plugin instance shared across projects cannot rely on closure state.
+ * Whether `environment` transforms modules for vitest browser mode: only then
+ * does its own plugin list carry `vitest:browser*` plugins. That holds however
+ * browser mode was enabled (config, `--browser`, or a project). The top-level
+ * config's plugin list does not tell the modes apart on vitest 5, which adds
+ * `vitest:browser:loader` to every project and injects the browser plugins
+ * per environment through `applyToEnvironment`.
  */
-function isBrowserModeServer(environment: Environment | undefined): boolean {
+function isBrowserModeEnvironment(environment: Environment | undefined): boolean {
   if (environment?.name !== 'client') return false;
-  const config = environment.getTopLevelConfig();
-  let isBrowser = browserModeServers.get(config);
+  let isBrowser = browserModeEnvironments.get(environment);
   if (isBrowser === undefined) {
-    isBrowser = config.plugins.some((plugin) =>
+    isBrowser = environment.plugins.some((plugin) =>
       plugin.name.startsWith(VITEST_BROWSER_PLUGIN_PREFIX),
     );
-    browserModeServers.set(config, isBrowser);
+    browserModeEnvironments.set(environment, isBrowser);
   }
   return isBrowser;
 }
@@ -226,7 +226,7 @@ export default function oxcAngular(options: OxcAngularOptions = {}): Plugin {
           // Styles: an explicit boolean wins; otherwise keep styles only under
           // vitest browser mode. The `client` environment name alone is not
           // enough: vitest also runs jsdom/happy-dom projects through `client`.
-          keepStyles: options.keepStyles ?? isBrowserModeServer(this.environment),
+          keepStyles: options.keepStyles ?? isBrowserModeEnvironment(this.environment),
           // Vite returns the compiled CSS as a string for `?inline` imports —
           // hard-coded here since this plugin always delegates CSS to Vite.
           keepStylesQuery: 'inline',
